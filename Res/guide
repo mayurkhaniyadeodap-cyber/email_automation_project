@@ -1,0 +1,87 @@
+DeoDap Care — Final Customer-Care Mail Flow
+Two-system design: Mail Engine (System 1) + Care Panel (System 2)
+Final version — consolidates the voice notes, the Ticket Engine ASCII flow, and the Mail Integration plan  |  v2.0 FINAL  |  June 2026
+1. The two systems & the golden rule
+	System 1 — Mail Engine	System 2 — Care Panel (care.deodap.in)
+Owns	The mailbox (deodap.4300@gmail.com). Every inbound mail and every outbound mail goes through it. Holds the ignore list, AI classification, auto-replies, evidence loops and mail-side states.	The tickets. Ticket IDs (TKT-2026-NNNNNN), comments, media storage, agent assignment, the agent pipeline and the dashboard.
+Never does	Never stores ticket state of record — it only mirrors the TKT id it received.	Never reads or sends email directly. It only receives API calls from the Mail Engine (and can call back via webhook).
+Talks via	Calls 3 Care Panel APIs: open-ticket check, create ticket, add comment/media.	Returns ticket id + tracking link; optionally fires a webhook on agent reply / status change.
+Golden rule: a ticket exists ONLY when a human must act. Everything the Mail Engine can answer and close via API (Shopify + ship.deodap.com) stays as auto_resolved on the mail side — no ticket, no care-panel noise. This keeps the panel queue 100% actionable.
+2. End-to-end flow — 12 steps
+1.	Fetch: new mail arrives at deodap.4300@gmail.com → pulled via Gmail push (fallback: IMAP UID watermark polling).
+2.	Dedup: Message-ID already seen? → skip silently.
+3.	Ignore gate: spam / marketing / newsletter / sender on the manual block list → label, log, STOP. No reply, no ticket. (Only complaints and customer enquiries pass — everything else is excluded.)
+4.	Assign brand + mailbox: decide which store/brand the mail belongs to (alias, order prefix, content).
+5.	Extract: email, phone, order#, AWB (AI path), description, images, videos — from body, subject and attachments.
+6.	Self-lookup: before asking the customer anything, try the two APIs — Shopify (order/customer) and ship.deodap.com (AWB/courier). The sender email itself is a search key. If still nothing → auto-mail M1 asking for registered order# / email / mobile / AWB or any other detail registered with the order → state awaiting_evidence.
+7.	AI classify: Groq (fallback: Gemini) → category + sub-topic + confidence, matched against the static query list from the playbook document.
+8.	Confidence gate: confidence < 0.75 → no automation. Draft a reply, assign to agent, state awaiting_agent.
+9.	Action router: Route A auto-answer & close (no ticket) · Route B evidence loop then ticket · Route C direct ticket · Route D sensitive → human. (Section 4.)
+10.	Evidence loop (Route B): video/photo first if the category demands it; then the mandatory fields — order# and phone are asked TOGETHER in one mail if missing. Evidence complete = order# + phone + description (+ media where required).
+11.	Existing-ticket check: query Care Panel open-tickets for the same verified customer + same order. Same issue id already open → append comment + media, reply with the EXISTING ticket number and tracking link (no new ticket). Different issue on the same order → proceed as new (e.g. #100 Delayed → #101 Wrong Item).
+12.	Create & confirm: create the Care Panel ticket (store-json, phone-keyed) → upload media (sha256-deduped, webp→png) → generate tracking link care.deodap.in/t?id=hash → send confirmation mail with TKT id + link → state awaiting_agent.
+3. Gate details (IF / THEN / Action)
+3a. Ignore gate & dedup
+IF (condition)	THEN	Action
+Message-ID already processed	Skip silently.	—
+AI says marketing / newsletter / promotional	Mark as Marketing, exclude. No action of any kind beyond labelling + log.	ignored
+Sender is on the manual ignore list (admin-entered mail IDs)	Blocked + logged. Can never become a ticket — this is how any customer/sender can be blocked.	ignored
+Cannot deduce anything but clearly not a customer complaint/enquiry	Mark for the daily review label; no auto-reply.	ignored (review)
+Real customer complaint / enquiry	Continue to extraction.	new
+
+3b. Identity & contact resolution
+IF (condition)	THEN	Action
+Order# or AWB extracted	Shopify order lookup (order#) / ship.deodap.com lookup (AWB) → load order, customer, courier status.	Continue
+No order#/AWB, but phone or sender email matches a Shopify customer	Pull recent orders; exactly 1 recent → auto-select; 2+ → ask which one.	Continue / M1
+Nothing extractable AND no API match on any contact	Auto-mail M1: please share registered order number, email ID, mobile, AWB number, or any other detail registered with the order.	awaiting_evidence
+Reply arrives on a waiting thread	Re-extract, merge with the same case, resume where it stopped.	Loop
+4. Action router — four routes
+Route	Categories (static list)	What happens	Ticket?
+A — Auto-answer & close	FAQ, policy, store info, order status / EDD / tracking, serviceability, invoice copy — anything fully answerable from the document + APIs	Mail Engine pulls live data (Shopify + Ship), sends the answer, closes.	NO ticket — auto_resolved
+B — Evidence → ticket	Defective / damaged, missing item, wrong item, return, refund claims	Video/photo request first (waiting_for_video) → then order# + phone together in ONE mail if missing → evidence complete → Section 5.	YES, after evidence complete
+C — Direct ticket	Delay / EDD breach, expedite request, address change after dispatch, RTO, POD request	Mandatory fields check (order# + phone + description) → Section 5. No media needed.	YES
+D — Human first	Payment disputes, fraud, legal / consumer-court threat, abusive tone, anything sensitive or live-data sensitive, confidence < 0.75	Draft reply prepared, assigned to agent; high-priority flag where needed.	Agent decides (awaiting_agent / escalated)
+Rule: Routes B and C converge at EVIDENCE COMPLETE — both then pass the existing-ticket check before anything is created.
+5. Existing-ticket check → create → confirm
+IF (condition)	THEN	Customer gets
+Open ticket exists for same customer + same order + SAME issue id (sub-topic mapped to Care Panel issue id)	Do NOT create a new ticket. /t/add_comment appends the new mail + media to the existing ticket (Ticket Updated).	Mail M6 — existing TKT number + tracking link: “your ticket is already open; updates will come on this number.”
+Open ticket exists for same customer + same order but DIFFERENT issue	Continue as new — one issue = one ticket (e.g. #100 Delayed and #101 Wrong Item can both be open on one order).	Mail M5 — new TKT number + link
+No open ticket	Create Care Panel ticket (store-json, phone-keyed) → upload media → generate tracking link.	Mail M5 — new TKT number + link
+
+6. Care Panel API contract (the only bridge between the systems)
+Call	When	Payload	Returns
+GET open-tickets	Before every ticket creation	Verified email + phone, order#, issue id	List of open tickets (id, issue, status)
+POST create-ticket	Evidence complete + no same-issue open ticket	store-json: brand, customer (phone-keyed), order#, category/sub-topic → issue id, description	TKT-2026-NNNNNN
+POST /t/add_comment	Same-issue ticket exists, or extra info arrives later on any ticket	Comment text + media files (sha256-deduped; webp converted to png)	OK
+Webhook (recommended)	Agent replies / status changes in the panel	TKT id, new status, agent message	Mail Engine sends the update mail to the customer — so the panel still never touches the mailbox
+Media rules: every attachment is hashed (sha256) so the same photo sent twice is stored once; webp is converted to png before upload; videos are linked/stored as received.
+7. Outbound mails the Mail Engine sends (M1–M7)
+ID — trigger	Body (English master; keep Hindi variant, auto-pick by detected language)
+M1 — no identifying details found	Thank you for writing to DeoDap. We could not locate your order from this mail. Please reply with any one of these: registered order number, email ID, mobile number, AWB/tracking number — or any other detail registered with the order.
+M2 — video/photo required (Route B)	Sorry to hear this. To register the complaint for order [ID], please reply with an unedited unboxing video AND a clear photo of the item — mandatory for damage / wrong / missing-item claims.
+M3 — order# + phone missing (asked together, one mail)	To proceed, please share BOTH of these in one reply: (1) your order number, (2) the mobile number registered with the order.
+M4 — auto-answer (Route A)	[Answer generated from playbook + live API data — status, EDD, tracking link, policy text, invoice attached, etc.] This mail closes the request; reply to reopen.
+M5 — new ticket created	Your complaint is registered. Ticket number: [TKT-2026-NNNNNN]. Track status anytime: care.deodap.in/t?id=[hash]. Our team will update you on this same ticket.
+M6 — ticket already open	A ticket for this issue is already open on your order: [TKT-2026-NNNNNN]. We have added today’s details to it. Track the latest update here: care.deodap.in/t?id=[hash].
+M7 — reminder / auto-close on waiting states	Reminder at 24 h: “we’re waiting for [missing item] to proceed.” Auto-close at 72 h: “closing for now — reply anytime and it will reopen automatically.”
+
+8. Status machine & dashboard
+State (Mail Engine)	Meaning	Shows on dashboard as
+new → classified	Ingested, extracted, classified.	—
+ignored	Stopped at the ignore gate (spam / marketing / blocklist).	Blocked log
+auto_resolved	Route A: answered & closed via API. No ticket.	Auto Handled
+waiting_for_video	Route B: M2 sent, media pending.	Waiting For Evidence
+awaiting_evidence	M1 or M3 sent — identifiers / mandatory fields pending.	Waiting For Evidence
+awaiting_agent	Ticket created in Care Panel, or low-confidence draft assigned.	Awaiting Agent
+escalated	Route D sensitive / high priority.	Awaiting Agent (priority)
+in_progress → resolved → closed	Owned by the Care Panel from here; Mail Engine mirrors via webhook.	In Progress / Resolved
+Pipeline on the dashboard: Waiting For Evidence → Awaiting Agent → In Progress → Resolved, surfaced as clickable KPI cards (pipeline_report). Timers: waiting states get a 24-hour reminder (M7) and auto-close at 72 hours; any reply within 7 days reopens the same case.
+9. Edge rules & locked decisions
+•	Blocklist is silent: addresses in the ignore section never get any reply and can never open a ticket.
+•	Marketing gets no action: label + log only — never an auto-reply (avoids confirming the address to spammers).
+•	One issue = one ticket: same order can hold multiple open tickets only if the issues are genuinely different.
+•	Order# + phone always asked together in one mail — never two separate back-and-forth mails for two fields.
+•	AWB extraction is AI-path only (no blind regex auto-action on AWBs) — it then verifies against ship.deodap.com before use.
+•	Auto-resolved cases never create panel noise; they live in the Mail Engine log + dashboard counter only.
+•	Language: reply in the customer’s detected language (EN/HI/GU) using template variants.
+•	Open point to confirm: the agent-reply webhook (Section 6, row 4). Without it, agents must reply from the panel UI while the Mail Engine separately mails the customer — with it, one click in the panel triggers the customer mail through the Mail Engine. Recommended: build the webhook.

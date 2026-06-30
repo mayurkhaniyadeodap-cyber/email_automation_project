@@ -1,0 +1,180 @@
+{% load tz %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Track Ticket {{ number }} — DeoDap Support</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#f4f6fb; color:#1f2937; }
+    .page { max-width: 960px; }
+    .brand { font-weight:700; color:#c0152f; letter-spacing:.3px; }
+    .label { font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:#8a93a3; }
+    .value { font-weight:600; }
+    /* progress stepper */
+    .stepper { display:flex; gap:0; flex-wrap:wrap; }
+    .step { flex:1 1 0; text-align:center; position:relative; min-width:90px; padding-top:26px; }
+    .step .dot { width:18px; height:18px; border-radius:50%; background:#d3d9e3;
+      position:absolute; top:0; left:50%; transform:translateX(-50%); z-index:2; }
+    .step::before { content:""; position:absolute; top:8px; left:0; width:50%; height:3px; background:#d3d9e3; }
+    .step::after  { content:""; position:absolute; top:8px; right:0; width:50%; height:3px; background:#d3d9e3; }
+    .step:first-child::before, .step:last-child::after { display:none; }
+    .step.done .dot, .step.current .dot { background:#198754; }
+    .step.done::before, .step.done::after, .step.current::before { background:#198754; }
+    .step.current .dot { box-shadow:0 0 0 4px rgba(25,135,84,.2); background:#0d6efd; }
+    .step.current::before { background:#0d6efd; }
+    .step .sname { font-size:.78rem; color:#6b7280; }
+    .step.current .sname, .step.done .sname { color:#1f2937; font-weight:600; }
+    /* timeline */
+    .tl { position:relative; padding-left:28px; }
+    .tl::before { content:""; position:absolute; left:9px; top:4px; bottom:4px; width:2px; background:#e5e9f0; }
+    .tl-item { position:relative; margin-bottom:18px; }
+    .tl-item .tl-dot { position:absolute; left:-24px; top:3px; width:14px; height:14px;
+      border-radius:50%; background:#0d6efd; border:3px solid #fff; box-shadow:0 0 0 1px #cdd6e5; }
+    .tl-item.customer .tl-dot { background:#fd7e14; }
+    .tl-item.event .tl-dot { background:#adb5bd; }
+    .tl-when { font-size:.72rem; color:#9aa3b2; }
+    .media-thumb { width:100%; height:120px; object-fit:cover; border-radius:8px; border:1px solid #e5e9f0; }
+    a.media-link { text-decoration:none; }
+  </style>
+</head>
+<body>
+<div class="container page py-4">
+
+  <div class="d-flex align-items-center mb-3">
+    <span class="brand fs-4">DeoDap</span>
+    <span class="text-muted ms-2">Support</span>
+  </div>
+
+  {% if sent %}
+  <div class="alert alert-success py-2">Thanks — your reply has been added to this ticket.</div>
+  {% endif %}
+
+  <!-- 1. HEADER -->
+  <div class="card shadow-sm border-0 mb-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div>
+          <div class="label">Ticket Number</div>
+          <div class="fs-4 fw-bold">{{ number }}</div>
+        </div>
+        <span class="badge text-bg-{{ status_badge }} fs-6 align-self-center">{{ status_label }}</span>
+      </div>
+      <hr class="my-3">
+      <div class="row g-3">
+        <div class="col-6 col-md-3"><div class="label">Issue Category</div><div class="value">{{ category }}</div></div>
+        <div class="col-6 col-md-3"><div class="label">Created</div><div class="value">{{ ticket.created_at|date:"d M Y, H:i" }}</div></div>
+        <div class="col-6 col-md-3"><div class="label">Last Updated</div><div class="value">{{ ticket.updated_at|date:"d M Y, H:i" }}</div></div>
+        <div class="col-6 col-md-3"><div class="label">Issue</div><div class="value">{{ issue }}</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. PROGRESS -->
+  <div class="card shadow-sm border-0 mb-3">
+    <div class="card-body">
+      <div class="label mb-3">Progress</div>
+      <div class="stepper">
+        {% for s in progress %}
+        <div class="step {% if s.done %}done{% endif %} {% if s.current %}current{% endif %}">
+          <span class="dot"></span><div class="sname">{{ s.name }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3">
+    <!-- 2. CUSTOMER INFO -->
+    <div class="col-md-5">
+      <div class="card shadow-sm border-0 mb-3 h-100">
+        <div class="card-body">
+          <div class="label mb-2">Customer Information</div>
+          <div class="mb-2"><div class="label">Name</div><div class="value">{{ customer.name }}</div></div>
+          <div class="mb-2"><div class="label">Email</div><div class="value">{{ customer.email|default:"—" }}</div></div>
+          {% if customer.phone %}<div class="mb-2"><div class="label">Phone</div><div class="value">{{ customer.phone }}</div></div>{% endif %}
+          {% if customer.order_id %}<div class="mb-2"><div class="label">Order ID</div><div class="value">{{ customer.order_id }}</div></div>{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. MEDIA FILES -->
+    <div class="col-md-7">
+      <div class="card shadow-sm border-0 mb-3 h-100">
+        <div class="card-body">
+          <div class="label mb-2">Media Files ({{ media|length }})</div>
+          {% if media %}
+          <div class="row g-2">
+            {% for m in media %}
+              <div class="col-6 col-lg-4">
+                {% if m.kind == "image" %}
+                  <a class="media-link" href="{{ m.url }}" target="_blank" title="{{ m.filename }}">
+                    <img class="media-thumb" src="{{ m.url }}" alt="{{ m.filename }}">
+                  </a>
+                {% elif m.kind == "video" %}
+                  <video class="media-thumb" controls preload="metadata">
+                    <source src="{{ m.url }}" type="{{ m.content_type }}">
+                  </video>
+                {% else %}
+                  <a class="media-link d-flex align-items-center justify-content-center media-thumb bg-light text-secondary"
+                     href="{{ m.url }}" target="_blank" title="{{ m.filename }}">📄 File</a>
+                {% endif %}
+                <div class="small text-truncate text-muted mt-1" title="{{ m.filename }}">{{ m.filename }}</div>
+              </div>
+            {% endfor %}
+          </div>
+          {% else %}
+            <div class="text-muted small">No attachments yet.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. CONVERSATION TIMELINE -->
+  <div class="card shadow-sm border-0 mb-3">
+    <div class="card-body">
+      <div class="label mb-3">Conversation</div>
+      {% if timeline %}
+      <div class="tl">
+        {% for e in timeline %}
+        <div class="tl-item {% if e.is_customer %}customer{% elif e.is_event %}event{% endif %}">
+          <span class="tl-dot"></span>
+          <div class="d-flex justify-content-between">
+            <span class="fw-semibold">{{ e.sender }}</span>
+            <span class="tl-when">{{ e.when|date:"d M Y, H:i" }}</span>
+          </div>
+          <div class="{% if e.is_event %}text-muted{% endif %}" style="white-space:pre-wrap;">{{ e.text }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+        <div class="text-muted small">No conversation yet.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 6. REPLY -->
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body">
+      <div class="label mb-2">Add a Reply</div>
+      <form method="post" action="/t?id={{ hash_id }}" enctype="multipart/form-data">
+        {% csrf_token %}
+        <input type="hidden" name="id" value="{{ hash_id }}">
+        <textarea name="comment" class="form-control mb-2" rows="3"
+                  placeholder="Describe your issue or add more details…"></textarea>
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <input type="file" name="files" class="form-control" style="max-width:320px;" multiple
+                 accept="image/*,video/*,.pdf">
+          <button type="submit" class="btn btn-success px-4">Submit</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="text-center text-muted small mb-4">
+    Our team will update you by email on this ticket. © DeoDap
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,29 @@
+asgiref==3.11.1
+Django==5.1.15
+django-cors-headers==4.9.0
+djangorestframework==3.17.1
+python-dotenv==1.2.2
+sqlparse==0.5.5
+tzdata==2026.2
+
+# Phase 1 -- Gmail API ingestion (doc section 2). Only needed for a LIVE Gmail
+# connection; the ingestion logic and the test suite run without them.
+google-api-python-client==2.149.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+
+# Phase 3 -- AI classifier (doc section 4). Install the SDK matching the brand's
+# selected provider. Only needed for LIVE classification; tests use a fake provider.
+google-generativeai==0.8.3   # Gemini
+openai>=1.54                 # ChatGPT + Groq (Groq uses the OpenAI-compatible API)
+
+# Phase 5 -- live-data integrations (doc section 8): Shopify / Shipping / GoKwik.
+# Only needed for LIVE lookups; the context builder + tests run without it.
+requests==2.32.3
+Pillow>=10.0
+APScheduler>=3.10
+openpyxl>=3.1
+reportlab>=4.0
+
+# Production WSGI server (used by gunicorn systemd service; not needed for dev/tests).
+gunicorn>=21.2
