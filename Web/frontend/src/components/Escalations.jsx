@@ -15,18 +15,15 @@ import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
-import { api, getToken } from "../api";
+import { api, attachmentUrl } from "../api";
 import { useSupportEmails } from "../useSupportEmails.js";
 import { fmtDate } from "./chips.jsx";
 
 const TERMINAL = ["resolved", "ignored", "ticket_created"];
 
-// Attachment download links served from /api/attachments/ need the token (an <a> can't send
-// headers), so append ?token= as the endpoint allows.
-function attHref(url) {
-  if (!url) return url;
-  return url.includes("/api/attachments/") ? `${url}?token=${getToken()}` : url;
-}
+// Attachment links served from /api/attachments/ need the base path (sub-path deploy) + token
+// (an <a> can't send headers); attachmentUrl handles both and passes others through unchanged.
+const attHref = (url) => attachmentUrl(url);
 
 // HIGH-priority escalation INBOX (Gmail / Zendesk style): left list, right conversation, all
 // actions in the top action bar of the detail view.

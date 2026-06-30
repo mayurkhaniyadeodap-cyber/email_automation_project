@@ -71,6 +71,20 @@ async function requestForm(path, formData) {
   return data;
 }
 
+// Resolve a backend attachment URL (root-relative, e.g. "/api/attachments/3/") against the
+// app's base path so it works under a sub-path deploy (/email_automation), then append the
+// auth token so <img>/<video>/<a> tags (which can't send an Authorization header) can load it.
+// Non-attachment URLs are returned unchanged.
+export function attachmentUrl(url, { download = false } = {}) {
+  if (!url || !url.includes("/api/attachments/")) return url;
+  let u = url;
+  if (u.startsWith("/") && !u.startsWith(import.meta.env.BASE_URL)) {
+    u = import.meta.env.BASE_URL.replace(/\/$/, "") + u;
+  }
+  const sep = u.includes("?") ? "&" : "?";
+  return `${u}${sep}token=${encodeURIComponent(getToken())}${download ? "&download=1" : ""}`;
+}
+
 export const api = {
   get: (path, params) => request("GET", path, { params }),
   post: (path, body, params) => request("POST", path, { body, params }),

@@ -13,15 +13,13 @@ import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
-import { api, getToken } from "../api";
+import { api, attachmentUrl } from "../api";
 import { useSupportEmails } from "../useSupportEmails.js";
 import { fmtDate } from "./chips.jsx";
 
-// Attachment links (served from /api/attachments/) need the token in the query string.
-function attHref(url) {
-  if (!url) return url;
-  return url.includes("/api/attachments/") ? `${url}?token=${getToken()}` : url;
-}
+// Attachment links (served from /api/attachments/) need the base path (sub-path deploy) + token;
+// attachmentUrl handles both and passes non-attachment URLs through unchanged.
+const attHref = (url) => attachmentUrl(url);
 
 // Internal Communications INBOX (Gmail-style). Completely independent of tickets / escalations:
 // these are internal company emails, never customer support. Left list, right conversation.

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, getToken } from "../api";
+import { api, attachmentUrl } from "../api";
 import { fmtDate } from "./ui.jsx";
 
 function humanSize(bytes) {
@@ -22,9 +22,7 @@ export default function Attachments({ ticketId }) {
       .catch(() => setItems([]));
   }, [ticketId]);
 
-  const token = getToken();
-  const fileUrl = (a, download = false) =>
-    `${a.url}?token=${encodeURIComponent(token)}${download ? "&download=1" : ""}`;
+  const fileUrl = (a, download = false) => attachmentUrl(a.url, { download });
 
   return (
     <div className="card">
