@@ -6,6 +6,10 @@ import react from "@vitejs/plugin-react";
 // reverse proxy. Override the target with VITE_API_TARGET if the backend runs
 // elsewhere.
 export default defineConfig({
+  // Sub-path the app is served from. "/" in dev; set VITE_BASE=/email_automation/ at
+  // build time to deploy under https://care.deodap.info/email_automation. Drives the
+  // asset URLs, import.meta.env.BASE_URL (api prefix), and the React Router basename.
+  base: process.env.VITE_BASE || "/",
   plugins: [react()],
   server: {
     port: 5173,

@@ -12,7 +12,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
-import { api, getToken } from "../api";
+import { api, getToken, API } from "../api";
 import { fmtDate } from "./chips.jsx";
 
 const REPORTS = {
@@ -72,7 +72,7 @@ export default function Reports() {
   function exportAs(fmt) {
     const q = new URLSearchParams({ ...query(), export: fmt }).toString();
     // token via query so the browser download carries auth
-    const url = `/api/analytics/${cfg.endpoint}/?${q}`;
+    const url = `${API}/analytics/${cfg.endpoint}/?${q}`;
     fetch(url, { headers: { Authorization: `Token ${getToken()}` } })
       .then((r) => r.blob()).then((b) => {
         const a = document.createElement("a");

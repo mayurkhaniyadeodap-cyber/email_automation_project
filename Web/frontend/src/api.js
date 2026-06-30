@@ -3,6 +3,11 @@
 
 const TOKEN_KEY = "deodap_care_token";
 
+// The API lives under the same base path the app is served from. import.meta.env.BASE_URL
+// is "/" in dev and the Vite `base` (e.g. "/email_automation/") in a sub-path build, so
+// API calls resolve to "/api/..." locally and "/email_automation/api/..." in production.
+export const API = `${import.meta.env.BASE_URL}api`.replace(/\/{2,}/g, "/");
+
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY) || "";
 }
@@ -34,7 +39,7 @@ async function request(method, path, { params, body } = {}) {
   if (token) headers["Authorization"] = `Token ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
-  const res = await fetch(`/api${path}${buildQuery(params)}`, {
+  const res = await fetch(`${API}${path}${buildQuery(params)}`, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -58,7 +63,7 @@ async function requestForm(path, formData) {
   const headers = {};
   const token = getToken();
   if (token) headers["Authorization"] = `Token ${token}`;   // NO Content-Type: browser sets it
-  const res = await fetch(`/api${path}`, { method: "POST", headers, body: formData });
+  const res = await fetch(`${API}${path}`, { method: "POST", headers, body: formData });
   let data = null;
   const text = await res.text();
   if (text) { try { data = JSON.parse(text); } catch { data = text; } }
@@ -77,7 +82,7 @@ export const api = {
 
 // --- auth ---
 export async function login(username, password) {
-  const res = await fetch("/api/auth/login/", {
+  const res = await fetch(`${API}/auth/login/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -93,7 +98,7 @@ export const logoutApi = () => api.post("/auth/logout/").catch(() => {});
 
 // Auto-login (no credentials) -> opens the panel without a sign-in screen.
 export async function guestLogin() {
-  const res = await fetch("/api/auth/guest/", { method: "POST" });
+  const res = await fetch(`${API}/auth/guest/`, { method: "POST" });
   if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => ({})));
   const data = await res.json();
   setToken(data.token);

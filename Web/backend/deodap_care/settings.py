@@ -111,6 +111,23 @@ STATIC_URL = "static/"
 # Where `collectstatic` gathers static files for production (served by nginx). Harmless in dev.
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# --- Sub-path mounting (e.g. served under https://care.deodap.info/email_automation) ---
+# FORCE_SCRIPT_NAME makes reverse()/redirects include the prefix; nginx strips the prefix
+# from the proxied path so URL routing still matches /api, /admin. STATIC_URL stays
+# relative ("static/") so Django auto-prepends the script name. Blank = mounted at root.
+FORCE_SCRIPT_NAME = env("FORCE_SCRIPT_NAME", "") or None
+if FORCE_SCRIPT_NAME:
+    # Scope cookies to the sub-path and give them unique names so a SECOND Django app on
+    # the same domain (e.g. care.deodap.info/support) can't clobber our session/CSRF.
+    SESSION_COOKIE_PATH = FORCE_SCRIPT_NAME
+    CSRF_COOKIE_PATH = FORCE_SCRIPT_NAME
+    SESSION_COOKIE_NAME = "ea_sessionid"
+    CSRF_COOKIE_NAME = "ea_csrftoken"
+
+# Behind nginx doing TLS termination: trust its X-Forwarded-Proto so request.is_secure(),
+# CSRF referer checks, and generated redirects use https.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 # Uploaded email attachments (images / videos / files).
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
@@ -144,6 +161,10 @@ CORS_ALLOWED_ORIGINS = [
     ).split(",")
     if o
 ]
+
+# Origins trusted for unsafe (POST/PUT) requests -- Django 4+ requires this for the
+# admin/login form behind an HTTPS reverse proxy. Comma-separated scheme://host values.
+CSRF_TRUSTED_ORIGINS = [o for o in env("CSRF_TRUSTED_ORIGINS", "").split(",") if o]
 
 
 # --- Email provider ---

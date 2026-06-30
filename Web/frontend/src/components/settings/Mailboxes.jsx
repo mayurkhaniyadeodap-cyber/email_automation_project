@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../../api";
+import { api, API } from "../../api";
 import { useAuth } from "../../auth.jsx";
 import { useScope } from "../../scope.jsx";
 
@@ -33,7 +33,7 @@ export default function Mailboxes() {
   }, [orgId, brandId]);
 
   function connect(mb) {
-    window.open(`/api/gmail/connect/?mailbox=${mb.id}`, "_blank");
+    window.open(`${API}/gmail/connect/?mailbox=${mb.id}`, "_blank");
     setMsg("A Google authorization tab opened. Approve access, then click “Fetch emails”.");
   }
 
