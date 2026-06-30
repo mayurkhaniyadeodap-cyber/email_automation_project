@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import Box from "@mui/material/Box";
+import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
 import Paper from "@mui/material/Paper";
 import Tab from "@mui/material/Tab";
@@ -34,6 +35,18 @@ export default function Inbox() {
   const [rows, setRows] = useState([]);
   const [count, setCount] = useState(0);
   const [loading, setLoading] = useState(false);
+  const isIgnoredTab = TABS[tab][0] === "ignored";
+
+  // Un-ignore (un-block) a wrongly-filtered email straight from the Ignored list:
+  // restores it to the queue. stopPropagation so the row's open-detail click doesn't fire.
+  async function unignore(id, e) {
+    e.stopPropagation();
+    try {
+      await api.post(`/tickets/${id}/unignore/`);
+    } finally {
+      load();   // it leaves the Ignored tab, so refresh the list
+    }
+  }
 
   useEffect(() => { setTab(params.get("status") === "ignored" ? 3 : 0); },
     [params]); // react to card navigation
@@ -102,6 +115,7 @@ export default function Inbox() {
               <TableCell>Status</TableCell>
               <TableCell>Conf.</TableCell>
               <TableCell>Received</TableCell>
+              {isIgnoredTab && <TableCell align="right">Action</TableCell>}
             </TableRow>
           </TableHead>
           <TableBody>
@@ -117,11 +131,19 @@ export default function Inbox() {
                 <TableCell><StatusChip status={t.status} label={t.status_display} /></TableCell>
                 <TableCell>{t.ai_confidence != null ? t.ai_confidence.toFixed(2) : "—"}</TableCell>
                 <TableCell>{fmtDate(t.created_at)}</TableCell>
+                {isIgnoredTab && (
+                  <TableCell align="right">
+                    <Button size="small" variant="outlined"
+                      onClick={(e) => unignore(t.id, e)}>
+                      Un-ignore
+                    </Button>
+                  </TableCell>
+                )}
               </TableRow>
             ))}
             {!loading && rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6} align="center" sx={{ py: 5, color: "text.secondary" }}>
+                <TableCell colSpan={isIgnoredTab ? 7 : 6} align="center" sx={{ py: 5, color: "text.secondary" }}>
                   No emails. Click “Fetch Mail”, or run manage.py seed_demo.
                 </TableCell>
               </TableRow>
