@@ -3146,7 +3146,19 @@ def handle_incoming_email(mailbox, message):
                     "reason=internal_communication (never enters support pipeline by design).", gmid)
         return None, None, internal
 
-    # 1b) HIGH-PRIORITY ESCALATION: legal / consumer-court / grievance / negative-review. This
+    # 1b) BLOCK / IGNORE gate -- a sender/domain/header matching an ACTIVE block-list entry is
+    # IGNORED here, BEFORE classification, escalation, evidence, pending and auto-reply, so a
+    # blocked sender never gets a reply and is never held. INACTIVE entries do NOT match (the
+    # Unblock behavior) -> such mail falls through to the normal pipeline below. ingest_message
+    # creates the Ignored ticket (visible in the Ignored tab) and runs no further automation.
+    if ignore_gate.evaluate(brand, message).ignored:
+        ticket, msg, created = ingest_message(mailbox, message)
+        logger.info("REPLY-DECISION message=%s from=%s matched=block_list auto_reply=SKIPPED "
+                    "reason=blocked_sender_ignored (before classification).", gmid,
+                    message.get("from_email") or "-")
+        return ticket, msg, created
+
+    # 1c) HIGH-PRIORITY ESCALATION: legal / consumer-court / grievance / negative-review. This
     # STOPS ALL automation BEFORE classification, verification, tracking, evidence and ticketing.
     # The email is queued for MANUAL REVIEW; the customer gets NO automatic reply, NO ticket.
     esc = _maybe_escalate(mailbox, message, gmid)
