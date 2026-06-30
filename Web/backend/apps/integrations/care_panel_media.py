@@ -14,7 +14,11 @@ video/quicktime, application/pdf.
 """
 
 import logging
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,69 @@ ACCEPTED_TYPES = {"image/jpeg", "image/jpg", "image/png", "video/mp4",
                   "video/quicktime", "application/pdf"}
 _TOKEN_RE = re.compile(r'name="_token"\s+value="([^"]+)"')
 DEFAULT_COMMENT = "Customer shared photo / video evidence."
+
+# The external Care Panel's nginx caps the upload body at ~1 MB (verified by probe). Target
+# the compressed video safely under that -- the multipart form fields + boundaries also count
+# toward the body, so leave headroom.
+CARE_PANEL_MAX_BYTES = 950_000
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+
+
+def _video_duration(path):
+    if not _FFPROBE:
+        return 0.0
+    try:
+        out = subprocess.run(
+            [_FFPROBE, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30)
+        return float((out.stdout or "0").strip() or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _compress_video(content, target_bytes=CARE_PANEL_MAX_BYTES):
+    """Re-encode a video down to <= target_bytes (H.264/AAC, progressively scaled down) so it
+    fits the external Care Panel's upload limit. Budgets the bitrate from the clip duration and
+    steps through resolution/audio ladders until it fits. Returns the compressed bytes, or None
+    if it can't get under the target (e.g. a very long clip). Best-effort; never raises."""
+    if not _FFMPEG:
+        return None
+    tmpd = tempfile.mkdtemp(prefix="cpv_")
+    src = os.path.join(tmpd, "in")
+    try:
+        with open(src, "wb") as fh:
+            fh.write(content)
+        dur = _video_duration(src)
+        # (max_width, audio_kbps) -- least aggressive first; last entry drops audio.
+        for width, a_kbps in ((640, 64), (480, 48), (360, 32), (320, 0)):
+            if dur > 0:
+                total_kbps = (target_bytes * 8 / 1000) / dur
+                v_kbps = int(max(120, total_kbps - a_kbps) * 0.9)   # 10% headroom
+            else:
+                v_kbps = 600
+            out = os.path.join(tmpd, f"out_{width}.mp4")
+            cmd = [_FFMPEG, "-y", "-i", src,
+                   "-vf", f"scale='min({width},iw)':-2",
+                   "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "baseline",
+                   "-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.2)}k",
+                   "-bufsize", f"{v_kbps * 2}k", "-movflags", "+faststart"]
+            cmd += (["-c:a", "aac", "-b:a", f"{a_kbps}k"] if a_kbps else ["-an"])
+            cmd += [out]
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=180, check=True)
+            except Exception:  # noqa: BLE001
+                continue
+            if os.path.exists(out) and 0 < os.path.getsize(out) <= target_bytes:
+                with open(out, "rb") as fh:
+                    return fh.read()
+        return None
+    except Exception:  # noqa: BLE001
+        logger.exception("Care Panel video compression failed")
+        return None
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
 
 
 def _is_uploadable(att):
@@ -138,6 +205,19 @@ def upload_attachments(ticket, comment=None, session=None):
                 a.save(update_fields=["remote_url", "updated_at"])
                 continue
             fname, content, ctype = prepared
+            # Videos over the external 1 MB cap are re-encoded smaller so they still fit; if it
+            # can't be shrunk enough we still attempt the original (it 413s, gets logged, and is
+            # left pending for retry if the care.deodap.in limit is later raised).
+            if ctype.startswith("video/") and len(content) > CARE_PANEL_MAX_BYTES:
+                comp = _compress_video(content)
+                if comp and len(comp) < len(content):
+                    logger.info("Care Panel media: compressed video %s %d -> %d bytes to fit limit.",
+                                fname, len(content), len(comp))
+                    content = comp
+                else:
+                    logger.warning("Care Panel media: could not shrink %s under %d bytes; "
+                                   "attempting original (expect 413 until care.deodap.in raises "
+                                   "client_max_body_size).", fname, CARE_PANEL_MAX_BYTES)
             data = {"_token": token, "hashId": hash_id, "comment": comment or DEFAULT_COMMENT}
             files = [("attachments[]", (fname, content, ctype))]
             logger.info("Care Panel add_comment UPLOAD ticket=%s hashId=%s file=%s size=%d",
