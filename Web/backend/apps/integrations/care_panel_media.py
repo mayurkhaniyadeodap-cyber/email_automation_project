@@ -124,7 +124,13 @@ def upload_attachments(ticket, comment=None, session=None):
             return 0
         token = m.group(1)
 
-        files, used = [], []
+        # Upload ONE FILE PER REQUEST. The external Care Panel's nginx caps the request body
+        # (client_max_body_size), so a single multi-MB video 413s -- and batching all files in
+        # one POST made the WHOLE upload fail (the small image was lost with it). Per-file means
+        # each attachment is judged on its own: small files still get through even when a large
+        # one is rejected, and an oversized file fails in isolation (logged, not silently dropped).
+        marker = ticket.tracking_url or f"{TRACKING_BASE}/t?id={hash_id}"
+        uploaded = 0
         for a in pending:
             prepared = _prepare_file(a)         # convert webp->png, drop unsupported
             if prepared is None:
@@ -132,45 +138,46 @@ def upload_attachments(ticket, comment=None, session=None):
                 a.save(update_fields=["remote_url", "updated_at"])
                 continue
             fname, content, ctype = prepared
-            files.append(("attachments[]", (fname, content, ctype)))
-            used.append(a)
-        if not files:
-            logger.info("Care Panel media ticket=%s: no Care-Panel-compatible files.",
-                        ticket.ticket_id)
-            return 0
-        pending = used
-        data = {"_token": token, "hashId": hash_id, "comment": comment or DEFAULT_COMMENT}
-
-        logger.info("Care Panel add_comment UPLOAD ticket=%s hashId=%s files=%d",
-                    ticket.ticket_id, hash_id, len(files))
-        resp = session.post(
-            f"{TRACKING_BASE}/t/add_comment", data=data, files=files,
-            headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-            timeout=60,
-        )
-        logger.info("Care Panel add_comment RESPONSE ticket=%s status=%s",
-                    ticket.ticket_id, resp.status_code)
-
-        if resp.status_code not in (200, 201, 302):
-            logger.error("Care Panel media upload FAILED ticket=%s status=%s body=%s",
-                         ticket.ticket_id, resp.status_code, (resp.text or "")[:400])
-            AuditLogEntry.objects.create(
-                ticket=ticket, actor="system", event="care_panel_media_failed",
-                detail={"status": resp.status_code, "body": (resp.text or "")[:300],
-                        "files": len(files)},
-            )
-            return 0
-
-        marker = ticket.tracking_url or f"{TRACKING_BASE}/t?id={hash_id}"
-        for a in pending:
+            data = {"_token": token, "hashId": hash_id, "comment": comment or DEFAULT_COMMENT}
+            files = [("attachments[]", (fname, content, ctype))]
+            logger.info("Care Panel add_comment UPLOAD ticket=%s hashId=%s file=%s size=%d",
+                        ticket.ticket_id, hash_id, fname, len(content))
+            try:
+                resp = session.post(
+                    f"{TRACKING_BASE}/t/add_comment", data=data, files=files,
+                    headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+                    timeout=120,
+                )
+            except Exception:  # noqa: BLE001 -- one bad file must not abort the rest
+                logger.exception("Care Panel media POST ERROR ticket=%s file=%s",
+                                 ticket.ticket_id, fname)
+                continue
+            logger.info("Care Panel add_comment RESPONSE ticket=%s file=%s status=%s",
+                        ticket.ticket_id, fname, resp.status_code)
+            if resp.status_code not in (200, 201, 302):
+                too_large = resp.status_code == 413
+                logger.error(
+                    "Care Panel media upload FAILED ticket=%s file=%s size=%d status=%s%s body=%s",
+                    ticket.ticket_id, fname, len(content), resp.status_code,
+                    " -> file exceeds the Care Panel nginx client_max_body_size; raise it on the "
+                    "care.deodap.in server" if too_large else "", (resp.text or "")[:200])
+                AuditLogEntry.objects.create(
+                    ticket=ticket, actor="system", event="care_panel_media_failed",
+                    detail={"file": fname, "size": len(content),
+                            "status": resp.status_code, "too_large": too_large},
+                )
+                continue  # leave remote_url="" so it retries if the limit is later raised
             a.remote_url = marker
             a.save(update_fields=["remote_url", "updated_at"])
-        logger.info("Care Panel media UPLOADED ticket=%s files=%d", ticket.ticket_id, len(pending))
-        AuditLogEntry.objects.create(
-            ticket=ticket, actor="system", event="care_panel_media_uploaded",
-            detail={"count": len(pending), "files": [a.filename for a in pending]},
-        )
-        return len(pending)
+            uploaded += 1
+            logger.info("Care Panel media UPLOADED ticket=%s file=%s", ticket.ticket_id, fname)
+
+        if uploaded:
+            AuditLogEntry.objects.create(
+                ticket=ticket, actor="system", event="care_panel_media_uploaded",
+                detail={"count": uploaded},
+            )
+        return uploaded
     except Exception:  # noqa: BLE001 -- best-effort
         logger.exception("Care Panel media upload ERROR for %s", ticket.ticket_id)
         return 0
