@@ -113,11 +113,15 @@ export default function BlockList() {
                 <td><code>{e.value}</code></td>
                 <td className="muted">{e.note || "—"}</td>
                 <td>
-                  <button className="btn" onClick={() => toggle(e)}>
-                    {e.is_active ? "On" : "Off"}
-                  </button>
+                  <span style={{ color: e.is_active ? "#d32f2f" : "#888", fontWeight: 600 }}>
+                    {e.is_active ? "Blocking" : "Inactive"}
+                  </span>
                 </td>
                 <td>
+                  <button className="btn" onClick={() => toggle(e)}
+                    style={{ marginRight: 8 }}>
+                    {e.is_active ? "Unblock" : "Block"}
+                  </button>
                   <button className="btn" onClick={() => remove(e)}>
                     Delete
                   </button>
