@@ -87,7 +87,6 @@ export default function Dashboard() {
     ["Resolved", { total: p.resolved }, "#2e7d32", "/tickets?status=resolved,auto_resolved"],
     ["Auto Replies Sent", s.auto_replies, "#00838f", "/reports/auto"],
     ["Manual Replies Sent", s.manual_replies, "#6a1b9a", "/reports/manual"],
-    ["Resolved Today", s.resolved_today, "#2e7d32", "/tickets?status=resolved,auto_resolved"],
   ];
 
   return (
