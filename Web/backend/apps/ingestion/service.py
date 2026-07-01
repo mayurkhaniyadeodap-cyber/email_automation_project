@@ -1403,6 +1403,14 @@ def _handle_inquiry_reply(mailbox, message, pending):
 
         missing = inquiry.missing_fields(itype, data)
         need_shot = inquiry.requires_attachment(itype) and not ex.get("_has_screenshot")
+        if itype in ("FRAUD_PAYMENT", "FRAUD_ALERT"):
+            logger.info("PARSED_DESCRIPTION=%r",
+                        data.get("fraud_description") or data.get("call_description") or "")
+            logger.info("PARSED_FRAUDSTER_MOBILE=%r",
+                        data.get("fraud_mobile") or data.get("suspicious_mobile") or "")
+            logger.info("SCREENSHOT_FOUND=%s", bool(ex.get("_has_screenshot")))
+            logger.info("MISSING_FIELDS=%s",
+                        (missing + (["screenshot"] if need_shot else [])) or "none")
         if missing or need_shot:
             _send_inquiry_missing(pending, spec, missing, need_shot)
             pending.save()

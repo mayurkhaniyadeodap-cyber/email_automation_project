@@ -226,10 +226,12 @@ FLOWS = {
                  "Once we receive these details, our support team will investigate your case.\n\n"
                  "Thank you.\n\n"
                  "DeoDap Support Team",
-        "fields": [("fraud_description", ("brief description of the fraud", "fraud description",
-                                          "description", "fraud", "details")),
+        "fields": [("fraud_description", ("brief description of the fraud", "issue description",
+                                          "brief description", "fraud description", "description",
+                                          "fraud", "details")),
                    ("fraud_mobile", ("fraudster's mobile number", "fraudster mobile number",
-                                     "fraudster mobile", "fraudster", "fraud mobile") + _MOBILE)],
+                                     "fraudster mobile", "fraudster number", "fraudster",
+                                     "fraud mobile", "suspicious mobile") + _MOBILE)],
         "optional_fields": [("reporter_name", ("your full name", "full name", "name")),
                             ("payment_amount", ("payment amount", "amount", "paid amount",
                                                 "amount paid"))],
@@ -263,9 +265,11 @@ FLOWS = {
                                           "suspicious caller mobile number",
                                           "suspicious caller mobile", "suspicious mobile number",
                                           "suspicious mobile", "caller mobile", "caller number",
-                                          "suspicious number", "caller")),
+                                          "suspicious number", "fraudster mobile",
+                                          "fraudster number", "caller")),
                    ("call_description", ("brief description of the call or message",
-                                         "call description", "description", "message details",
+                                         "call description", "issue description",
+                                         "brief description", "description", "message details",
                                          "message", "call details", "details"))],
         "optional_fields": [("reporter_name", ("your full name", "full name", "name"))],
         "attachment_required": False, "attachment_field": "screenshot",
@@ -323,25 +327,77 @@ def requires_attachment(inquiry_type):
     return bool(FLOWS.get(inquiry_type, {}).get("attachment_required"))
 
 
+_MD_STRIP = str.maketrans("", "", "*_`#>~")
+
+
+def _norm_label(s):
+    """Normalize a field label: drop markdown/quote chars (*, _, #, `, >, ~), leading bullets /
+    numbering, and surrounding punctuation; collapse whitespace; lowercase.
+    '  **Fraud Description:** ' -> 'fraud description'."""
+    s = (s or "").translate(_MD_STRIP)
+    s = s.strip().lstrip("-•*·>0123456789. \t").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s.strip(" \t:-=.").lower()
+
+
+def _split_label_value(line):
+    """Split 'Label: value' (also '-' / '=' separators) into (normalized_label, value).
+    Returns (None, line) when there is no label separator -- i.e. a plain value line."""
+    for sep in (":", "=", "-"):
+        if sep in line:
+            label, _, value = line.partition(sep)
+            nl = _norm_label(label)
+            if nl:
+                return nl, value.strip()
+    return None, line.strip()
+
+
 def parse_fields(text, fields):
-    """Parse a SINGLE reply of 'Label: value' lines into {field_key: value}. Tolerant of
-    order, casing, whitespace and ':' / '-' / '=' separators. Matches the field whose alias
-    equals the line label (longest alias first so 'mobile number' beats 'mobile')."""
-    parsed = []
-    for raw in (text or "").replace("\r", "").split("\n"):
-        ln = raw.strip()
-        if not ln:
+    """Parse a customer reply into {field_key: value}. Tolerant of:
+      - 'Label: value' on ONE line AND 'Label:' with the value on the NEXT line(s),
+      - case, extra whitespace, ':' / '-' / '=' separators,
+      - markdown (*, _, #, `, >, ~), leading bullets / numbering, and Gmail-quoted lines.
+    Matches the field whose alias EQUALS the (normalized) line label -- longest alias first so
+    'fraudster mobile number' wins over 'mobile'."""
+    known = set()                     # normalized alias labels -> tell a field line from a value
+    for _key, aliases in fields:
+        for a in aliases:
+            known.add(_norm_label(a))
+    lines = (text or "").replace("\r", "").split("\n")
+    parsed = []                       # [(normalized_label, value), ...]
+    n, i = len(lines), 0
+    while i < n:
+        raw = lines[i].strip()
+        if not raw or raw.startswith(">"):      # blank line or Gmail-quoted original -> ignore
+            i += 1
             continue
-        for sep in (":", "-", "="):
-            if sep in ln:
-                label, _, value = ln.partition(sep)
-                parsed.append((label.strip().lower(), value.strip()))
-                break
+        nl, value = _split_label_value(raw)
+        if nl is not None and nl in known:
+            if value:
+                parsed.append((nl, value))
+            else:
+                # 'Label:' alone -> the value is the following non-empty line(s), up to the next
+                # blank line or the next KNOWN field label (multi-line values are joined).
+                j, vals = i + 1, []
+                while j < n:
+                    s2 = lines[j].strip()
+                    if not s2:
+                        break                                   # blank line ends the value
+                    nl2, _v2 = _split_label_value(s2)
+                    if nl2 is not None and nl2 in known:
+                        break                                   # next field label ends the value
+                    vals.append(s2)
+                    j += 1
+                if vals:
+                    parsed.append((nl, " ".join(vals)))
+                    i = j - 1
+        i += 1
     found = {}
     for key, aliases in fields:
         for alias in sorted(aliases, key=len, reverse=True):
+            na = _norm_label(alias)
             for label, value in parsed:
-                if value and label == alias:
+                if value and label == na:
                     found[key] = value
                     break
             if key in found:

@@ -65,6 +65,62 @@ class ParserTests(TestCase):
                          {"franchise_investment", "franchise_mobile"})
 
 
+class FraudParserTests(TestCase):
+    """The fraud reply parser must extract Description + Fraudster Mobile from real replies:
+    same-line OR next-line values, label variations, mixed case, markdown, bullets, currency
+    symbols and Gmail-quoted replies -- and never re-ask for a field that was provided."""
+
+    def _p(self, text):
+        return inquiry.parse_fields(text, inquiry.flow_all_fields("FRAUD_PAYMENT"))
+
+    def test_description_same_line(self):
+        d = self._p("Description: Paid 5000 to fake employee\nFraudster Mobile: 7905597007")
+        self.assertEqual(d["fraud_description"], "Paid 5000 to fake employee")
+        self.assertEqual(d["fraud_mobile"], "7905597007")
+
+    def test_description_next_line(self):
+        d = self._p("Fraud Description:\nPaid 5000 to fake employee.\n\n"
+                    "Fraudster Mobile:\n7905597007")
+        self.assertEqual(d["fraud_description"], "Paid 5000 to fake employee.")
+        self.assertEqual(d["fraud_mobile"], "7905597007")
+
+    def test_exact_reported_customer_reply(self):
+        # The exact reply from the bug report (₹ symbol, next-line values, 'Screenshot attached.').
+        d = self._p("Fraud Description:\nPaid ₹5000 to fake DeoDap employee.\n\n"
+                    "Fraudster Mobile:\n7905597007\n\nScreenshot attached.")
+        self.assertEqual(d["fraud_description"], "Paid ₹5000 to fake DeoDap employee.")
+        self.assertEqual(d["fraud_mobile"], "7905597007")
+        self.assertEqual(inquiry.missing_fields("FRAUD_PAYMENT", d), [])   # nothing missing
+
+    def test_description_and_brief_issue_labels(self):
+        self.assertEqual(self._p("Fraud Description: a\nMobile: 1")["fraud_description"], "a")
+        self.assertEqual(self._p("Description: b\nMobile: 1")["fraud_description"], "b")
+        self.assertEqual(self._p("Brief Description: c\nMobile: 1")["fraud_description"], "c")
+        self.assertEqual(self._p("Issue Description: d\nMobile: 1")["fraud_description"], "d")
+
+    def test_all_mobile_label_variations(self):
+        for lbl in ("Fraudster Mobile", "Fraudster Mobile Number", "Fraud Mobile", "Mobile",
+                    "Mobile Number", "Fraudster Number", "Suspicious Mobile"):
+            d = self._p(f"Description: x\n{lbl}: 7905597007")
+            self.assertEqual(d.get("fraud_mobile"), "7905597007", f"label={lbl}")
+
+    def test_mixed_case_markdown_and_bullets(self):
+        d = self._p("**FRAUD DESCRIPTION:** Paid 5000\n- fraudster mobile : 7905597007")
+        self.assertEqual(d["fraud_description"], "Paid 5000")
+        self.assertEqual(d["fraud_mobile"], "7905597007")
+
+    def test_gmail_quoted_reply(self):
+        text = ("Fraud Description: paid 5000 to fake agent\nFraudster Mobile: 7905597007\n\n"
+                "On Mon, Jul 1, 2026 at 3:00 PM DeoDap Support <care@deodap.com> wrote:\n"
+                "> To help us investigate your payment fraud report, please reply with:\n"
+                "> - Brief description of the fraud\n"
+                "> - Fraudster's mobile number\n"
+                "> - Payment screenshot (Mandatory)\n")
+        d = self._p(text)
+        self.assertEqual(d["fraud_description"], "paid 5000 to fake agent")
+        self.assertEqual(d["fraud_mobile"], "7905597007")
+
+
 @override_settings(PUBLIC_BASE_URL="https://care.deodap.in")
 class SingleReplyInquiryTests(InquiryBase):
     # === Dropshipping (no YES gate; one reply) ========================================
@@ -216,6 +272,21 @@ class FraudInquiryTests(InquiryBase):
         self._fraud_payment(screenshot=False)
         self.assertEqual(Ticket.objects.count(), 0)
         self.assertIn("Screenshot", self._bodies())
+
+    def test_next_line_labels_with_screenshot_creates_ticket(self):
+        # Reported bug: labels with the value on the NEXT line (+ ₹ + 'Screenshot attached.')
+        # must extract Description + Fraudster Mobile and create the ticket -- never re-ask.
+        self._run(
+            eml(subject="Fraud", body="Payment done to fraudster", message_id="<n@x>"),
+            self._reply("Fraud Description:\nPaid ₹5000 to fake DeoDap employee.\n\n"
+                        "Fraudster Mobile:\n7905597007\n\nScreenshot attached.", "n2",
+                        original="<n@x>", image=True))
+        self.assertEqual(Ticket.objects.count(), 1)              # completed, not re-asked
+        t = Ticket.objects.get()
+        self.assertEqual(t.extracted["fraud_issue_type"], "FRAUD_PAYMENT")
+        self.assertEqual(t.extracted["fraud_mobile"], "7905597007")
+        self.assertIn("fake DeoDap employee", t.extracted.get("fraud_description", ""))
+        self.assertIn("Ticket ID:", self._bodies())              # confirmation sent
 
     # --- ISSUE 1: fraud NEVER shows the option menu -- send the info-request straight away -----
     def test_payment_fraud_skips_menu(self):
