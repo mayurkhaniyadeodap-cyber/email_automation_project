@@ -14,10 +14,39 @@ drafts instead of auto-answering on stale data.
 
 import datetime
 import logging
+import re
 
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# The public ship.deodap.in tracking portal is server-rendered with the LIVE courier status in
+# its 'Current Status' hero -- e.g. <div class="hero-label">Current Status</div><h1>Return To
+# Origin</h1>. When the shipment-flow API is down we read the status straight from that page.
+_PORTAL_STATUS_RE = re.compile(
+    r"Current\s*Status\s*</div>\s*<h1[^>]*>\s*([^<]+?)\s*</h1>", re.IGNORECASE | re.DOTALL)
+
+
+def scrape_portal_status(awb):
+    """Best-effort: read the LIVE courier status for an AWB from the public ship.deodap.in
+    tracking portal (server-rendered). Returns '' on any failure. NEVER raises."""
+    from django.conf import settings as dj_settings
+
+    if not awb or not getattr(dj_settings, "SHIPPING_PORTAL_FALLBACK", True):
+        return ""
+    base = getattr(dj_settings, "SHIPPING_TRACKING_URL_BASE",
+                   "https://ship.deodap.in/tracking/").rstrip("/")
+    try:
+        import requests
+
+        r = requests.get(f"{base}/{awb}", timeout=15)
+        if r.status_code != 200:
+            return ""
+        m = _PORTAL_STATUS_RE.search(r.text or "")
+        return m.group(1).strip() if m else ""
+    except Exception:  # noqa: BLE001 -- best-effort; status falls back to Shopify
+        logger.warning("Tracking: portal status scrape failed for awb=%s -> skipped.", awb)
+        return ""
 
 
 def _settings_for(brand):
@@ -302,6 +331,19 @@ def lookup_tracking(brand, order_id="", awb="", clients=None, phone="", email=""
             # Panel / Shopify remain authoritative; we simply skip the courier status.
             logger.warning("Tracking: courier lookup failed for awb=%s -> skipped (non-fatal).",
                            out["awb"])
+
+    # Portal fallback: the shipment-flow API + AWB courier track can be down, yet the public
+    # ship.deodap.in tracking portal still renders the LIVE status. When Care Panel + courier
+    # gave us nothing, read the status off that portal so RTO/Delivered/etc. reach the customer
+    # instead of falling back to Shopify's 'fulfilled'.
+    if (shipping and out["awb"] and not courier_status
+            and not cp_shipment_status and not cp_order_status):
+        portal_status = scrape_portal_status(out["awb"])
+        if portal_status:
+            courier_status = portal_status
+            out["status"] = out["status"] or portal_status
+            logger.info("PORTAL-TRACKING-STATUS %s (ship.deodap.in awb=%s)",
+                        portal_status, out["awb"])
 
     # === TRACK-ORDER LINK -- always provide a link when one can be built (priority): ===
     #   1 Care Panel courier trackingUrl  2 Shopify fulfillment tracking_url (only when Care

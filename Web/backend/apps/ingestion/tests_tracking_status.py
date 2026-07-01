@@ -301,6 +301,26 @@ class LookupTrackingTests(TestCase):
                     {"order_id": "1", "raw_status": raw, "refund_status": "Not Applicable"})
                 self.assertIn(f"Status: {shown}", body)
 
+    def test_portal_status_fallback_when_apis_down(self):
+        # Reported bug: the shipment-flow API + AWB courier track are down (404), but the public
+        # ship.deodap.in portal renders the LIVE status -> read it from there, never fall back to
+        # Shopify 'fulfilled'.
+        from unittest import mock
+        from apps.integrations import context as ctx
+        order = {"shipped": True, "awb": "7D130639143", "tracking_url": "",
+                 "raw_fulfillment_status": "fulfilled", "financial_status": "paid",
+                 "order_status_url": "https://shop/orders/x"}
+        ship = FakeShipping({})                               # courier track returns None (down)
+        with self._with_care_panel(None), \
+                mock.patch.object(ctx, "scrape_portal_status", return_value="Return To Origin"):
+            info = lookup_tracking(self.brand, "262182531", clients=self._clients(
+                shopify=FakeShopify({"262182531": order}), shipping=ship))
+        self.assertEqual(info["status_source"], "courier")   # portal status enters as courier
+        self.assertEqual(info["raw_status"], "Return To Origin")
+        body = service._format_tracking_details(info)
+        self.assertIn("Status: Return To Origin (RTO)", body)
+        self.assertNotIn("fulfilled", body.lower())
+
     def test_raw_shopify_fulfillment_status_shown_when_no_courier(self):
         body, info = self._status_email(fulfillment="Unfulfilled")
         self.assertEqual(info["status_source"], "shopify_fulfillment")
