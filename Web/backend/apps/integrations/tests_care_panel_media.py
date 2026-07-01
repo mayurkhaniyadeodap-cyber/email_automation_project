@@ -57,12 +57,14 @@ class MediaUploadTests(TestCase):
         t = self._ticket()
         sess = FakeSession()
         n = care_panel_media.upload_attachments(t, session=sess)
-        self.assertEqual(n, 2)
+        self.assertEqual(n, 2)                                 # both files uploaded
         self.assertTrue(sess.posted["url"].endswith("/t/add_comment"))
         self.assertEqual(sess.posted["data"]["hashId"], "4zA2EVBwP1")
         self.assertEqual(sess.posted["data"]["_token"], "CSRF123")
         self.assertTrue(sess.posted["data"]["comment"])
-        self.assertEqual(len(sess.posted["files"]), 2)
+        # ONE file per request now (batching made an oversized file sink the whole upload),
+        # so the last recorded POST carries a single attachment.
+        self.assertEqual(len(sess.posted["files"]), 1)
         self.assertEqual(sess.posted["files"][0][0], "attachments[]")
         # marked uploaded -> not re-sent
         self.assertEqual(care_panel_media.upload_attachments(t, session=FakeSession()), 0)
