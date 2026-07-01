@@ -187,12 +187,10 @@ class FraudInquiryTests(InquiryBase):
             service._send_customer_email, ctx.build_clients = os, ob
 
     def _fraud_payment(self, screenshot=True, mid="a"):
-        # report fraud -> menu -> "1" -> FRAUD_PAYMENT -> VERIFY (Shopify down -> proceed) ->
-        # details. Uses _run (no Shopify configured -> cannot_verify -> proceeds with Unknown).
+        # Payment fraud -> ONE info-request email (no menu, no verify step) -> a single reply
+        # with the details + the mandatory payment screenshot -> ticket. Uses _run (no Shopify).
         self._run(
-            eml(subject="Fraud", body="report fraud", message_id=f"<{mid}@x>"),
-            self._reply("1", f"{mid}1", original=f"<{mid}@x>"),
-            self._reply("my mobile 9550413577", f"{mid}v", original=f"<{mid}@x>"),   # STEP 1
+            eml(subject="Fraud", body="Payment done to fraudster", message_id=f"<{mid}@x>"),
             self._reply("Description: paid 5000 to fake agent\nName: Rahul\n"
                         "Fraudster Mobile: 9123456780\nAmount: 5000", f"{mid}2",
                         original=f"<{mid}@x>", image=screenshot))
@@ -210,8 +208,8 @@ class FraudInquiryTests(InquiryBase):
         from apps.integrations.care_panel_store import _customer_name
         self.assertEqual(_customer_name(t), "Unknown")                # Shopify down -> Unknown
         b = self._bodies()
-        self.assertIn("Payment Screenshot (Mandatory)", b)
-        self.assertIn("Your complaint is registered.", b)             # STEP 4 wording
+        self.assertNotIn("Please choose an option", b)                # NO option menu
+        self.assertIn("Payment screenshot (Mandatory)", b)            # single info-request
         self.assertIn("Ticket ID:", b)
 
     def test_fraud_payment_screenshot_mandatory(self):
@@ -219,13 +217,15 @@ class FraudInquiryTests(InquiryBase):
         self.assertEqual(Ticket.objects.count(), 0)
         self.assertIn("Screenshot", self._bodies())
 
-    # --- ISSUE 1: skip the menu when the sub-category is already clear -----------------------
+    # --- ISSUE 1: fraud NEVER shows the option menu -- send the info-request straight away -----
     def test_payment_fraud_skips_menu(self):
-        # "I paid a fraud person" -> FRAUD_PAYMENT directly (no menu) -> STEP 1 asks to verify.
+        # "I paid a fraud person" -> FRAUD_PAYMENT directly: ONE info-request email, no menu.
         self._run(eml(subject="Fraud", body="I paid a fraud person", message_id="<p@x>"))
         first = self.sent[0]["body"]
         self.assertNotIn("1. Payment Done to Fraudster", first)        # no menu
-        self.assertIn("could not verify", first.lower())              # STEP 1 verify prompt
+        self.assertNotIn("Please choose an option", first)
+        self.assertIn("payment fraud report", first.lower())          # the info-request itself
+        self.assertIn("Payment screenshot (Mandatory)", first)
 
     def test_suspicious_call_skips_menu(self):
         for body in ("Get Suspicious Call", "Someone called asking OTP", "Fraud Call Received"):
@@ -237,43 +237,51 @@ class FraudInquiryTests(InquiryBase):
                 self._run(eml(subject="x", body=body, message_id="<s@x>"))
                 self.assertNotIn("1. Payment Done to Fraudster", self.sent[0]["body"])
 
-    def test_generic_fraud_shows_menu(self):
+    def test_generic_fraud_no_menu_defaults_to_payment(self):
+        # A generic fraud email (sub-type unclear) must NOT show a menu -- it defaults to the
+        # Payment Fraud info-request so the customer gets one actionable email.
         self._run(eml(subject="x", body="I have a fraud issue", message_id="<g@x>"))
         first = self.sent[0]["body"]
-        self.assertIn("1. Payment Done to Fraudster", first)
-        self.assertIn("2. Get Suspicious Call", first)
+        self.assertNotIn("1. Payment Done to Fraudster", first)
+        self.assertNotIn("2. Get Suspicious Call", first)
+        self.assertNotIn("Please choose an option", first)
+        self.assertIn("Payment screenshot (Mandatory)", first)         # defaulted info-request
 
-    # --- STEP 1: auto-verify + never collect/ticket without verification --------------------
-    def test_autoverify_from_first_email_then_collect(self):
-        # First email already has the mobile -> verified directly -> STEP 2 details requested.
+    # --- info-request goes out immediately; customer named from their own email identifier -----
+    def test_info_request_sent_immediately_no_verify_step(self):
+        # First email is clearly payment fraud -> ONE info-request email straight away (no verify
+        # prompt, no menu). The mobile in that email is used later to name the ticket.
         from apps.ingestion.tests_verification import FakeShopify
         order = {"order_id": "262339239", "customer_name": "Divya", "customer_phone": "9550413577"}
         shop = FakeShopify(orders={"262339239": order}, by_phone={"9550413577": [order]})
         self._run_shop(
             eml(subject="Fraud", body="I paid a fraud person. Mobile: 9550413577",
                 message_id="<a@x>"), shop=shop)
-        self.assertIn("Payment Screenshot (Mandatory)", self.sent[-1]["body"])  # asked details
-        self.assertNotIn("could not verify", self._bodies().lower())            # never re-asked
+        self.assertIn("Payment screenshot (Mandatory)", self.sent[-1]["body"])  # asked details
+        self.assertNotIn("could not verify", self._bodies().lower())            # no verify step
+        self.assertNotIn("Please choose an option", self._bodies())
 
-    def test_verification_fails_no_ticket(self):
-        # Shopify reachable but NO order for the mobile -> 'could not verify', NO ticket.
+    def test_unverified_still_creates_ticket(self):
+        # NEW: we no longer block on verification. Details received -> ticket is created (the
+        # customer name resolves to Unknown when Shopify has no match); a human agent investigates.
         from apps.ingestion.tests_verification import FakeShopify
+        from apps.integrations.care_panel_store import _customer_name
         self._run_shop(
-            eml(subject="Fraud", body="I paid a fraud person. Mobile: 9550413577",
-                message_id="<a@x>"),
+            eml(subject="Fraud", body="I paid a fraud person", message_id="<a@x>"),
             self._reply("Description: paid 5000\nName: x\nFraudster Mobile: 9123456780", 2,
                         image=True),
-            shop=FakeShopify())                       # empty -> not_found
-        self.assertEqual(Ticket.objects.count(), 0)
-        self.assertIn("could not verify", self._bodies().lower())
+            shop=FakeShopify())                       # empty -> no match
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertEqual(_customer_name(Ticket.objects.get()), "Unknown")
+        self.assertNotIn("could not verify", self._bodies().lower())
 
     def test_suspicious_call_no_screenshot_required(self):
-        # CASE 2: screenshot optional -> ticket from text fields alone (after verification).
+        # CASE 2: screenshot optional -> ticket from the text fields alone (no menu, no verify).
         self._run(
             eml(subject="x", body="suspicious call received", message_id="<a@x>"),
-            self._reply("my mobile 9550413577", 1),                    # STEP 1 verify (down->ok)
-            self._reply("Description: caller asked for OTP\nName: Rahul\n"
-                        "Suspicious Mobile: 9111122233", 2))
+            self._reply("Registered Mobile: 9550413577\nRegistered Email: c@x.com\n"
+                        "Suspicious Caller Mobile: 9111122233\n"
+                        "Description: caller asked for OTP", 2))
         self.assertEqual(Ticket.objects.count(), 1)
         t = Ticket.objects.get()
         self.assertEqual(t.extracted["fraud_issue_type"], "FRAUD_ALERT")
@@ -354,8 +362,8 @@ class FraudVerifiedNameAndDedupTests(InquiryBase):
     def test_suspicious_call_customer_name(self):
         self._run_shop(
             eml(subject="x", body="Get Suspicious Call. Mobile: 7601843922", message_id="<a@x>"),
-            self._reply("Description: caller asked OTP\nName: Typed\n"
-                        "Suspicious Mobile: 9123456780", 2),
+            self._reply("Registered Mobile: 7601843922\nRegistered Email: c@x.com\n"
+                        "Suspicious Caller Mobile: 9123456780\nDescription: caller asked OTP", 2),
             shop=self._shop(**{"7601843922": "Anita"}))
         self.assertEqual(Ticket.objects.count(), 1)
         self.assertEqual(self._name(Ticket.objects.get()), "Anita")
@@ -374,7 +382,8 @@ class FraudVerifiedNameAndDedupTests(InquiryBase):
         self.mailbox.save(update_fields=["imap_last_uid"])
         self._run_shop(
             eml(subject="x", body="Get Suspicious Call. Mobile: 9986498641", message_id="<c@x>"),
-            self._reply("Description: caller asked OTP\nName: x\nSuspicious Mobile: 9123456780",
+            self._reply("Registered Mobile: 9986498641\nRegistered Email: c@x.com\n"
+                        "Suspicious Caller Mobile: 9123456780\nDescription: caller asked OTP",
                         "c2", original="<c@x>"),
             shop=shop)
         self.assertEqual(Ticket.objects.count(), 2)          # SEPARATE ticket, not reused

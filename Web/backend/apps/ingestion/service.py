@@ -1555,27 +1555,41 @@ def _fraud_confirmation(ticket):
     return "\n".join(lines)
 
 
-def _fraud_resolve_customer(brand, ex, data):
-    """Resolve the VERIFIED customer (Shopify info) for the fraud ticket. Reuses STEP-1's result
-    when it found a name; otherwise re-verifies using the CUSTOMER's mobile / order / email --
-    NEVER the fraudster's number, the sender, or the typed reporter name. Empty -> 'Unknown'."""
+def _fraud_resolve_customer(brand, ex, data, extra_ids=None):
+    """Resolve the VERIFIED customer (Shopify info) for the fraud ticket. Verifies using the
+    CUSTOMER's mobile / order / email -- from the collected 'registered' fields, the customer's
+    ORIGINAL email + sender address (`extra_ids`), or a prior STEP-1 result -- NEVER the
+    fraudster's number, or the typed reporter name. Empty -> 'Unknown'."""
     info = ex.get("fraud_verified_info") or {}
     if (info.get("customer_name") or "").strip():
         return info
     fraudster = {str(data.get("fraud_mobile") or ""), str(data.get("suspicious_mobile") or ""),
                  str(data.get("caller_mobile") or "")}
-    mobiles = []
+    mobiles, orders, emails = [], [], []
     for v in (ex.get("verified_customer_mobile"), data.get("registered_mobile")):
         v = (v or "").strip()
         if v and v not in fraudster and v not in mobiles:
             mobiles.append(v)
-    order = (ex.get("verified_customer_order") or "").strip()
-    email = (ex.get("verified_customer_email") or data.get("registered_email") or "").strip()
+    o0 = (ex.get("verified_customer_order") or "").strip()
+    if o0:
+        orders.append(o0)
+    e0 = (ex.get("verified_customer_email") or data.get("registered_email") or "").strip()
+    if e0:
+        emails.append(e0)
+    # Identifiers taken from the customer's ORIGINAL email + sender address (no separate verify
+    # step now) -- so a verified customer name still resolves. Never the fraudster's number.
+    for (o, p, e) in (extra_ids or []):
+        p = (p or "").strip()
+        if p and p not in fraudster and p not in mobiles:
+            mobiles.append(p)
+        o, e = (o or "").strip(), (e or "").strip()
+        if o and o not in orders:
+            orders.append(o)
+        if e and e not in emails:
+            emails.append(e)
     attempts = [("mobile", m, ("", m, "")) for m in mobiles]
-    if order:
-        attempts.append(("order", order, (order, "", "")))
-    if email:
-        attempts.append(("email", email, ("", "", email)))
+    attempts += [("order", o, (o, "", "")) for o in orders]
+    attempts += [("email", e, ("", "", e)) for e in emails]
     for method, ident, (o, p, e) in attempts:
         status, found = _shopify_verify(brand, o, p, e, workflow="fraud")
         if status == "verified" and (found.get("customer_name") or "").strip():
@@ -1593,9 +1607,13 @@ def _complete_fraud_inquiry(mailbox, message, pending, spec):
     reg_email = data.get("registered_email") or ""
     fraudster_phone = data.get(spec.get("phone_field", "")) or ""
 
-    # CUSTOMER NAME = the VERIFIED order owner (STEP-1, re-resolved if needed). Never the sender,
-    # the typed reporter name, or the fraudster number. No verified customer -> 'Unknown'.
-    info = _fraud_resolve_customer(brand, ex, data)
+    # CUSTOMER NAME = the VERIFIED order owner. Identify them from their ORIGINAL email (order id /
+    # their own mobile) + sender address -- never the sender's typed name or the fraudster number.
+    from apps.classifier.rule_classifier import _extract_order_id, _extract_phone
+    first = pending.body_text or ""
+    cust_ids = [((pending.order_id or _extract_order_id(first) or ""),
+                 (_extract_phone(first) or ""), (sender_email or ""))]
+    info = _fraud_resolve_customer(brand, ex, data, extra_ids=cust_ids)
     cust_phone = (info.get("customer_phone") or ex.get("verified_customer_mobile") or "").strip()
     verified_name = (info.get("customer_name") or "").strip()
     logger.info("VERIFIED-CUSTOMER=%s", verified_name or "none")
