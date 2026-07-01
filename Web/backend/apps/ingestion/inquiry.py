@@ -340,6 +340,12 @@ def _norm_label(s):
     return s.strip(" \t:-=.").lower()
 
 
+def _clean_value(v):
+    """Trim surrounding markdown emphasis / quote chars and whitespace from a parsed value.
+    '** Paid 5000 **' -> 'Paid 5000'. Leaves inner text (incl. '₹', digits) untouched."""
+    return (v or "").strip().strip("*_`~> \t").strip()
+
+
 def _split_label_value(line):
     """Split 'Label: value' (also '-' / '=' separators) into (normalized_label, value).
     Returns (None, line) when there is no label separator -- i.e. a plain value line."""
@@ -348,7 +354,7 @@ def _split_label_value(line):
             label, _, value = line.partition(sep)
             nl = _norm_label(label)
             if nl:
-                return nl, value.strip()
+                return nl, _clean_value(value)
     return None, line.strip()
 
 
@@ -389,7 +395,7 @@ def parse_fields(text, fields):
                     vals.append(s2)
                     j += 1
                 if vals:
-                    parsed.append((nl, " ".join(vals)))
+                    parsed.append((nl, _clean_value(" ".join(vals))))
                     i = j - 1
         i += 1
     found = {}
