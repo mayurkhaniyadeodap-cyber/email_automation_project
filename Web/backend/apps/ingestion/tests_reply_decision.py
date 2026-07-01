@@ -84,9 +84,10 @@ class ReplyDecisionTests(TestCase):
         self.assertEqual(len(self.sent), 2, f"expected an auto-reply to the 2nd email, got {self.sent}")
         self.assertEqual(PendingConversation.objects.count(), 1)   # same conversation, no duplicate
 
-    def test_escalation_followup_is_diverted_and_logged(self):
-        """A frustrated follow-up containing an escalation keyword is diverted to manual review
-        with NO auto-reply -- and the exact reason is logged (no silent stop)."""
+    def test_pending_followup_not_hijacked_by_escalation(self):
+        """A follow-up to an ACTIVE pending that happens to contain an escalation keyword must be
+        handled by the pending workflow FIRST (routing priority: pending BEFORE escalation) --
+        the High-Priority engine must not hijack it, and the skip is logged (no silent stop)."""
         first = eml(subject="damaged product", body="my item arrived broken",
                     message_id="<cust1@gmail.com>")
         second = eml(subject="Re: damaged product",
@@ -95,11 +96,7 @@ class ReplyDecisionTests(TestCase):
                      references="<cust1@gmail.com> <reply1@deodap.com>")
         with self.assertLogs("apps.ingestion.service", level="INFO") as cm:
             self._run(first, second)
-        # The first email got its auto-reply; the escalation follow-up did NOT.
-        self.assertEqual(len(self.sent), 1, f"escalation follow-up must not auto-reply: {self.sent}")
-        self.assertEqual(Escalation.objects.count(), 1)
-        # The exact reason is logged, including that it diverted a reply to the pending.
+        # The follow-up belongs to the active pending -> NOT diverted to a new escalation.
+        self.assertEqual(Escalation.objects.count(), 0)
         joined = "\n".join(cm.output)
-        self.assertIn("auto_reply=SKIPPED", joined)
-        self.assertIn("reason=escalation_manual_review", joined)
-        self.assertIn("REPLY to pending=", joined)
+        self.assertIn("ESCALATION_SKIPPED_ACTIVE_PENDING", joined)

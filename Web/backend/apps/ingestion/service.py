@@ -3201,15 +3201,16 @@ def handle_incoming_email(mailbox, message):
     if active_pending is not None:
         _ex = active_pending.extracted or {}
         _fraud = _ex.get("inquiry_type") in ("FRAUD_PAYMENT", "FRAUD_ALERT")
+        _kind = _ex.get("inquiry_type") or _ex.get("intent") or active_pending.status or "pending"
         if _fraud:
             logger.info("FRAUD_PENDING_FOUND pending=%s type=%s status=%s from=%s -- reply "
                         "belongs to an active Fraud workflow.", active_pending.id,
                         _ex.get("inquiry_type"), active_pending.status,
                         message.get("from_email") or "-")
-        logger.info("ESCALATION_SKIPPED_ACTIVE_FRAUD pending=%s type=%s -- the High-Priority "
-                    "engine will NOT intercept a reply that already belongs to an active pending "
-                    "conversation.", active_pending.id,
-                    _ex.get("inquiry_type") or _ex.get("intent") or "-")
+        logger.info("%s pending=%s kind=%s -- the High-Priority engine will NOT intercept a "
+                    "reply that already belongs to an active pending conversation.",
+                    "ESCALATION_SKIPPED_ACTIVE_FRAUD" if _fraud
+                    else "ESCALATION_SKIPPED_ACTIVE_PENDING", active_pending.id, _kind)
 
     # 1c) HIGH-PRIORITY ESCALATION (only when NOT a reply to an active pending): legal /
     # consumer-court / grievance / negative-review. STOPS ALL automation for a NEW manual-review
