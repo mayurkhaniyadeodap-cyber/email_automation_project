@@ -1286,6 +1286,13 @@ def _handle_inquiry_first_email(mailbox, message, detected):
         # specific sub-flow directly ("I paid a fraud person" -> FRAUD_PAYMENT).
         subtype = inquiry.detect_menu_subcategory(
             detected, f"{message.get('subject','')} {message.get('body_text','')}")
+        # Report Fraud NEVER shows an option menu -- the issue is already classified. If the
+        # sub-type isn't obvious from the first email, default to Payment Fraud so a single
+        # info-request email goes out immediately (never "choose an option"). Other menu
+        # categories (bulk purchase) keep their menu.
+        if not subtype and detected == inquiry.REPORT_FRAUD:
+            subtype = inquiry.FRAUD_PAYMENT
+            logger.info("INQUIRY-FRAUD sub-category unclear -> default FRAUD_PAYMENT (no menu).")
         if subtype:
             logger.info("INQUIRY-SUBCATEGORY-DETECTED category=%s -> %s (skip menu).",
                         detected, subtype)
@@ -1317,10 +1324,6 @@ def _begin_inquiry_subflow(pending, mailbox, message, subtype):
     ex = dict(pending.extracted or {})
     ex["inquiry_type"] = subtype
     spec = inquiry.FLOWS.get(subtype) or {}
-    # Fraud -> VERIFY FIRST (STEP 1) before collecting details; NO ticket without verification.
-    if subtype in ("FRAUD_PAYMENT", "FRAUD_ALERT"):
-        pending.extracted = ex
-        return _fraud_start(pending, mailbox, message)
     if spec.get("auto_reply"):                 # Company Profile / VIP / Other -> reply now, done
         ex["inquiry_stage"] = "done"
         pending.extracted = ex
@@ -1333,10 +1336,13 @@ def _begin_inquiry_subflow(pending, mailbox, message, subtype):
         _create_inquiry_record(pending, mailbox, status=Inquiry.STATUS_COMPLETED)
         _close_inquiry(pending)
         return None, None, True
-    # Field-collecting flow -> ask for ALL details in one message; parse the single reply.
+    # Field-collecting flow (incl. fraud) -> send ONE email listing all required details for the
+    # DETECTED issue and wait for a single reply. Fraud no longer runs a separate verify-first
+    # step or an option menu: the info-request goes out immediately, and the customer is verified
+    # at completion from the registered mobile/email they provide (see _fraud_resolve_customer).
     ex["inquiry_stage"] = "awaiting_details"
     pending.extracted = ex
-    _inquiry_send(pending, spec["intro"])
+    _inquiry_send(pending, spec["intro"], subject=spec.get("subject"))
     return None, None, True
 
 

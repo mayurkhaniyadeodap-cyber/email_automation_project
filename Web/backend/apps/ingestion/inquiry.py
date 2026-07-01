@@ -213,17 +213,25 @@ FLOWS = {
                  "Our sales team will contact you shortly.",
     },
     FRAUD_PAYMENT: {
-        "intro": "Please provide ALL details in ONE reply:\n\n• Fraud Description\n"
-                 "• Your Full Name\n• Fraudster Mobile Number\n• Payment Amount\n"
-                 "• Payment Screenshot (Mandatory)\n\nExample:\nDescription: paid 5000 to a fake "
-                 "agent\nName: Chintan Dabhi\nFraudster Mobile: 9123456780\nAmount: 5000\n\n"
-                 "Please attach the payment screenshot -- the ticket is created only after the "
-                 "screenshot is received.",
-        "fields": [("fraud_description", ("fraud description", "description", "fraud", "details")),
-                   ("reporter_name", ("full name", "your full name", "name", "your name")),
-                   ("fraud_mobile", ("fraudster mobile number", "fraudster mobile", "fraudster",
-                                     "fraud mobile") + _MOBILE)],
-        "optional_fields": [("payment_amount", ("payment amount", "amount", "paid amount", "rs",
+        # The AI has already identified this as payment fraud -> send ONE info-request email
+        # straight away (no option menu, no "choose 1 or 2"). Ticket is created after the
+        # customer replies with the details + the mandatory payment screenshot.
+        "subject": "Additional Information Required – Payment Fraud Report",
+        "intro": "Dear Customer,\n\n"
+                 "To help us investigate your payment fraud report, please reply to this email "
+                 "with the following details:\n\n"
+                 "- Brief description of the fraud\n"
+                 "- Fraudster's mobile number\n"
+                 "- Payment screenshot (Mandatory)\n\n"
+                 "Once we receive these details, our support team will investigate your case.\n\n"
+                 "Thank you.\n\n"
+                 "DeoDap Support Team",
+        "fields": [("fraud_description", ("brief description of the fraud", "fraud description",
+                                          "description", "fraud", "details")),
+                   ("fraud_mobile", ("fraudster's mobile number", "fraudster mobile number",
+                                     "fraudster mobile", "fraudster", "fraud mobile") + _MOBILE)],
+        "optional_fields": [("reporter_name", ("your full name", "full name", "name")),
+                            ("payment_amount", ("payment amount", "amount", "paid amount",
                                                 "amount paid"))],
         "attachment_required": True, "attachment_field": "payment_screenshot",
         "final": "Thank you for reporting this.\n\nWe have created your fraud investigation "
@@ -232,16 +240,34 @@ FLOWS = {
         "phone_field": "fraud_mobile",
     },
     FRAUD_ALERT: {
-        "intro": "Please provide ALL details in ONE reply:\n\n• Call Description\n"
-                 "• Your Full Name\n• Suspicious Mobile Number\n"
-                 "• Call Screenshot / Recording (if available)\n\nExample:\nDescription: a caller "
-                 "asked for my OTP\nName: Chintan Dabhi\nSuspicious Mobile: 9123456780",
-        "fields": [("call_description", ("call description", "description", "message details",
-                                         "message", "details", "call details")),
-                   ("reporter_name", ("full name", "your full name", "name", "your name")),
-                   ("suspicious_mobile", ("suspicious mobile number", "suspicious mobile",
-                                          "suspicious number", "caller mobile", "caller number",
-                                          "caller"))],
+        # AI already identified this as a suspicious-call report -> ONE info-request email (no
+        # menu). Collects the customer's registered mobile/email (used to verify them at
+        # completion) plus the suspicious caller's number + description in a single reply.
+        "subject": "Additional Information Required – Suspicious Call Report",
+        "intro": "Dear Customer,\n\n"
+                 "To help us investigate your report, please reply to this email with the "
+                 "following details:\n\n"
+                 "- Registered mobile number\n"
+                 "- Registered email address\n"
+                 "- Suspicious caller's mobile number\n"
+                 "- Brief description of the call or message\n"
+                 "- Screenshot of the call log or message (if available)\n\n"
+                 "Once we receive these details, our support team will investigate your report."
+                 "\n\nThank you.\n\n"
+                 "DeoDap Support Team",
+        "fields": [("registered_mobile", ("registered mobile number", "registered mobile",
+                                          "registered number", "registered mobile no")),
+                   ("registered_email", ("registered email address", "registered email",
+                                         "email address", "registered mail")),
+                   ("suspicious_mobile", ("suspicious caller's mobile number",
+                                          "suspicious caller mobile number",
+                                          "suspicious caller mobile", "suspicious mobile number",
+                                          "suspicious mobile", "caller mobile", "caller number",
+                                          "suspicious number", "caller")),
+                   ("call_description", ("brief description of the call or message",
+                                         "call description", "description", "message details",
+                                         "message", "call details", "details"))],
+        "optional_fields": [("reporter_name", ("your full name", "full name", "name"))],
         "attachment_required": False, "attachment_field": "screenshot",
         "final": "Thank you for reporting this suspicious activity.\n\nWe have created a fraud "
                  "alert ticket for investigation.",
