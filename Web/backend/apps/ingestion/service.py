@@ -1354,6 +1354,10 @@ def _handle_inquiry_reply(mailbox, message, pending):
     body = _clean_reply(message.get("body_text", "") or "").strip()
     logger.info("INQUIRY-REPLY pending=%s stage=%s type=%s body=%r", pending.id, stage,
                 ex.get("inquiry_type"), body[:160])
+    if ex.get("inquiry_type") in ("FRAUD_PAYMENT", "FRAUD_ALERT"):
+        logger.info("FRAUD_PENDING_MATCHED pending=%s type=%s stage=%s -- reply processed by the "
+                    "Fraud workflow (High-Priority engine bypassed).", pending.id,
+                    ex.get("inquiry_type"), stage)
 
     # Menu selection -> resolve to a sub-flow and start it.
     if stage == "awaiting_menu":
@@ -1657,6 +1661,8 @@ def _complete_fraud_inquiry(mailbox, message, pending, spec):
                                          "priority": "high", "from_pending": pending.id})
     logger.info("FRAUD-TICKET-CREATED ticket=%s issue=%s priority=HIGH from_pending=%s",
                 ticket.ticket_id, issue_type, pending.id)
+    logger.info("FRAUD_TICKET_CREATED ticket=%s issue=%s priority=HIGH from_pending=%s (NOT an "
+                "escalation).", ticket.ticket_id, issue_type, pending.id)
 
     msg = Message.objects.create(
         ticket=ticket, direction=Message.DIRECTION_INBOUND,
@@ -1673,8 +1679,12 @@ def _complete_fraud_inquiry(mailbox, message, pending, spec):
     ticket.refresh_from_db()
 
     _inquiry_send(pending, _fraud_confirmation(ticket))   # STEP 4 (always includes the link)
+    logger.info("FRAUD_CONFIRMATION_SENT ticket=%s to=%s (Care Panel link included).",
+                ticket.ticket_id, pending.customer_email)
     _close_inquiry(pending)
     pending.save()
+    logger.info("FRAUD_PENDING_COMPLETED pending=%s -> ticket=%s (fraud workflow closed the "
+                "conversation; no escalation).", pending.id, ticket.ticket_id)
     return ticket, ticket.messages.order_by("created_at").last(), True
 
 
@@ -3182,27 +3192,39 @@ def handle_incoming_email(mailbox, message):
                     message.get("from_email") or "-")
         return ticket, msg, created
 
-    # 1c) HIGH-PRIORITY ESCALATION: legal / consumer-court / grievance / negative-review. This
-    # STOPS ALL automation BEFORE classification, verification, tracking, evidence and ticketing.
-    # The email is queued for MANUAL REVIEW; the customer gets NO automatic reply, NO ticket.
-    esc = _maybe_escalate(mailbox, message, gmid)
-    if esc is not None:
-        # A frustrated FOLLOW-UP to an existing pending can trip the escalation keywords and be
-        # diverted here BEFORE the pending-reply path runs -> no auto-reply. Make that explicit:
-        # surface whether this escalation hijacked a reply to a known pending conversation so a
-        # "second email got no reply" is never a silent mystery.
-        diverted = _match_pending(brand, message)[0]
-        note = ("" if diverted is None else
-                f" NOTE: this is a REPLY to pending={diverted.id} (status={diverted.status}) -- "
-                "escalation took precedence over the pending-evidence flow.")
-        logger.warning(
-            "REPLY-DECISION message=%s from=%s matched=escalation auto_reply=SKIPPED "
-            "reason=escalation_manual_review (no auto-reply by design).%s",
-            gmid, message.get("from_email") or "-", note)
-        return None, None, esc
+    # Routing priority for a reply: existing ticket / pending conversation ALWAYS win over the
+    # High-Priority escalation engine. A reply that belongs to an ACTIVE pending (fraud /
+    # verification / evidence / inquiry) naturally contains trigger words ("fraud", "fraudster",
+    # refund, legal ...) that would otherwise trip the escalation keywords and hijack it -> no
+    # ticket. So resolve the pending FIRST and let its own workflow (block 2) handle the reply.
+    active_pending = _find_pending(brand, message)
+    if active_pending is not None:
+        _ex = active_pending.extracted or {}
+        _fraud = _ex.get("inquiry_type") in ("FRAUD_PAYMENT", "FRAUD_ALERT")
+        if _fraud:
+            logger.info("FRAUD_PENDING_FOUND pending=%s type=%s status=%s from=%s -- reply "
+                        "belongs to an active Fraud workflow.", active_pending.id,
+                        _ex.get("inquiry_type"), active_pending.status,
+                        message.get("from_email") or "-")
+        logger.info("ESCALATION_SKIPPED_ACTIVE_FRAUD pending=%s type=%s -- the High-Priority "
+                    "engine will NOT intercept a reply that already belongs to an active pending "
+                    "conversation.", active_pending.id,
+                    _ex.get("inquiry_type") or _ex.get("intent") or "-")
 
-    # 2) Reply to a pending (awaiting-evidence) conversation?
-    pending = _find_pending(brand, message)
+    # 1c) HIGH-PRIORITY ESCALATION (only when NOT a reply to an active pending): legal /
+    # consumer-court / grievance / negative-review. STOPS ALL automation for a NEW manual-review
+    # email; the customer gets NO automatic reply, NO ticket.
+    if active_pending is None:
+        esc = _maybe_escalate(mailbox, message, gmid)
+        if esc is not None:
+            logger.warning(
+                "REPLY-DECISION message=%s from=%s matched=escalation auto_reply=SKIPPED "
+                "reason=escalation_manual_review (no auto-reply by design).",
+                gmid, message.get("from_email") or "-")
+            return None, None, esc
+
+    # 2) Reply to a pending (fraud / verification / evidence / inquiry) conversation?
+    pending = active_pending
     if pending is not None:
         # A reply within the 7-day window revives an auto-closed case.
         _reopen_if_closed(pending)

@@ -316,6 +316,57 @@ class FraudInquiryTests(InquiryBase):
 
 
 @override_settings(PUBLIC_BASE_URL="https://care.deodap.in")
+class FraudEscalationRoutingTests(InquiryBase):
+    """A reply that belongs to an ACTIVE fraud pending must be handled by the fraud workflow --
+    NEVER hijacked by the High-Priority / escalation engine, even though such replies naturally
+    contain escalation trigger words (police / cyber crime / legal action / consumer court)."""
+
+    def test_payment_fraud_reply_with_escalation_words_creates_ticket(self):
+        from apps.tickets.models import Escalation
+        # Reply body contains 'cyber crime' + 'police complaint' -> would trip escalation. It must
+        # instead create the fraud ticket because it belongs to the active fraud pending.
+        self._run(
+            eml(subject="Fraud", body="Payment done to fraudster", message_id="<f@x>"),
+            self._reply("Description: paid 5000, this is a cyber crime, I will file a police "
+                        "complaint\nFraudster Mobile: 9123456780", "f2",
+                        original="<f@x>", image=True))
+        self.assertEqual(Ticket.objects.count(), 1)                 # fraud ticket created
+        self.assertEqual(Ticket.objects.get().extracted["fraud_issue_type"], "FRAUD_PAYMENT")
+        self.assertEqual(Escalation.objects.count(), 0)             # NOT hijacked by escalation
+
+    def test_suspicious_call_reply_with_escalation_words_creates_ticket(self):
+        from apps.tickets.models import Escalation
+        self._run(
+            eml(subject="x", body="I got a suspicious call", message_id="<c@x>"),
+            self._reply("Registered Mobile: 9550413577\nRegistered Email: c@x.com\n"
+                        "Suspicious Caller Mobile: 9111122233\n"
+                        "Description: the caller threatened legal action and a consumer court case",
+                        "c2", original="<c@x>"))
+        self.assertEqual(Ticket.objects.count(), 1)
+        self.assertEqual(Ticket.objects.get().extracted["fraud_issue_type"], "FRAUD_ALERT")
+        self.assertEqual(Escalation.objects.count(), 0)            # active fraud never escalates
+
+    def test_high_priority_still_fires_for_new_complaint(self):
+        from apps.tickets.models import Escalation
+        # A NEW email (no active pending) with escalation words must STILL escalate.
+        self._run(eml(subject="Legal", body="I will file a consumer court case and a police "
+                      "complaint against you", message_id="<n@x>"))
+        self.assertEqual(Escalation.objects.count(), 1)            # High-Priority still works
+        self.assertEqual(Ticket.objects.count(), 0)
+
+    def test_existing_escalation_reply_still_appends(self):
+        from apps.tickets.models import Escalation
+        # First email escalates; a threaded reply appends to the SAME escalation (no pending
+        # matches an escalation, so the escalation path still runs) -- not duplicated, no ticket.
+        self._run(
+            eml(subject="Legal", body="consumer court case against you", message_id="<e1@x>"),
+            eml(subject="Re: Legal", body="any update on my consumer court case?",
+                message_id="<e2@x>", in_reply_to="<e1@x>", references="<e1@x>"))
+        self.assertEqual(Escalation.objects.count(), 1)            # appended, not duplicated
+        self.assertEqual(Ticket.objects.count(), 0)
+
+
+@override_settings(PUBLIC_BASE_URL="https://care.deodap.in")
 class FraudVerifiedNameAndDedupTests(InquiryBase):
     """Customer name from the verified order owner (Problem 1) + per-sub-category dedup
     (Problem 2)."""
