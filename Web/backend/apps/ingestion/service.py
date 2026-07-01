@@ -818,28 +818,52 @@ def _is_shipment_tracking(obj):
     return code == "1"
 
 
+def _map_tracking_status(raw):
+    """Present the LIVE courier/shipment status to the customer. lookup_tracking already ranks
+    the courier/shipment status ABOVE Shopify fulfillment, so `raw` is the courier status when
+    available. The ONLY transform is Return To Origin (any RTO variant -- 'RTO', 'RTO In Transit',
+    'RTO Delivered', 'Return To Origin') -> 'Return To Origin (RTO)'. Every other status
+    (In Transit / Out For Delivery / Delivered / Returned / Cancelled / NDR / ...) is verbatim."""
+    raw = (raw or "").strip()
+    s = re.sub(r"\s+", " ", raw.lower())
+    if s.startswith("rto") or "return to origin" in s:
+        return "Return To Origin (RTO)"
+    return raw
+
+
 def _tracking_status_text(info):
-    """RAW STATUS: the EXACT status the courier/Shopify API returned, with NO mapping,
-    grouping, normalization, or title-casing. lookup_tracking already resolved it (courier
-    -> Shopify fulfillment -> Shopify order) into info['raw_status']."""
-    return info.get("raw_status") or info.get("status") or "Update"
+    """Customer-facing status = the resolved live courier/shipment status (info['raw_status'],
+    which lookup_tracking prioritizes courier -> Care Panel -> ... -> Shopify fulfillment), run
+    through _map_tracking_status so 'Return To Origin' shows as 'Return To Origin (RTO)' and
+    Shopify 'fulfilled' never leaks."""
+    return _map_tracking_status(info.get("raw_status") or info.get("status")) or "Update"
+
+
+def _is_rto_status(info):
+    return _tracking_status_text(info) == "Return To Origin (RTO)"
 
 
 def _format_tracking_details(info):
-    """Build the customer status block: Order ID / Status / Courier / AWB / live courier
-    URL (omitting fields we don't have). The tracking URL is the REAL Shopify/courier link
-    -- never care.deodap.in and never build_tracking_url(). Status is shown VERBATIM."""
+    """Build the customer status block: Order ID / Status / (RTO note) / Courier / AWB / Refund /
+    live courier URL. The tracking URL is the REAL Shopify/courier link -- never care.deodap.in
+    and never build_tracking_url(). Status uses the mapped courier status (see above)."""
     lines = []
     if info.get("order_id"):
         lines.append(f"Order ID: {info['order_id']}")
     lines.append(f"Status: {_tracking_status_text(info)}")
+    rto = _is_rto_status(info)
+    if rto:
+        lines.append("Your shipment is currently being returned to the seller.")
     if info.get("courier"):
         lines.append(f"Courier: {info['courier']}")
     if info.get("awb"):
         lines.append(f"AWB: {info['awb']}")
-    # Refund Status -- directly below AWB (Refunded / Partially Refunded / Refund In Progress /
-    # Not Refunded / Not Applicable), from the Shopify order's financial/refund data.
-    lines.append(f"Refund Status: {info.get('refund_status') or 'Not Applicable'}")
+    # Refund Status -- from the Shopify order's financial/refund data; for RTO, verification is
+    # done after the returned shipment reaches the warehouse.
+    refund = info.get("refund_status") or "Not Applicable"
+    if rto and refund in ("Not Applicable", "", None):
+        refund = "Pending verification after returned shipment reaches the warehouse."
+    lines.append(f"Refund Status: {refund}")
     if info.get("tracking_url"):
         lines += ["", "Track Order:", info["tracking_url"]]
     return "\n".join(lines)

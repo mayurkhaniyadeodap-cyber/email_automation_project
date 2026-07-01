@@ -127,6 +127,10 @@ def compute_refund_status(financial_status="", raw_status="", cancelled_at=None)
         return "Partially Refunded"
     if fin == "voided":
         return "Not Applicable"
+    # Return To Origin -> the shipment is coming back; refund is assessed after it reaches the
+    # warehouse (unless it was already refunded above).
+    if raw.startswith("rto") or "return to origin" in raw:
+        return "Pending verification after returned shipment reaches the warehouse."
     # A returned / cancelled order: the money is owed back but not yet refunded.
     returned = bool(cancelled_at) or any(k in raw for k in ("rto", "return", "cancel", "refund"))
     if returned:

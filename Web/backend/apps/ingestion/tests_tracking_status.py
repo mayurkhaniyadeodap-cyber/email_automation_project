@@ -137,7 +137,8 @@ class LookupTrackingTests(TestCase):
         # All 5 states render directly below AWB.
         cases = [("refunded", "Delivered", None, "Refunded"),
                  ("partially_refunded", "Delivered", None, "Partially Refunded"),
-                 ("paid", "RTO-Delivered", None, "Refund In Progress"),
+                 ("paid", "RTO-Delivered", None,
+                  "Pending verification after returned shipment reaches the warehouse."),
                  ("pending", "Cancelled", "2026-01-01", "Not Refunded"),
                  ("paid", "Delivered", None, "Not Applicable")]
         for fin, raw, cancelled, expected in cases:
@@ -256,13 +257,49 @@ class LookupTrackingTests(TestCase):
         return service._format_tracking_details(info), info
 
     def test_raw_courier_statuses_shown_verbatim(self):
-        # Every courier status appears EXACTLY -- no Cancelled->In Transit, no RTO->Cancelled.
+        # Non-RTO courier statuses appear EXACTLY (no Cancelled->In Transit, no NDR->Ndr).
         for raw in ["Cancelled", "In Transit", "Out For Delivery", "Delivered",
-                    "RTO In Transit", "RTO Delivered", "Manifested", "Pending Pickup",
-                    "Processing"]:
+                    "Manifested", "Pending Pickup", "Processing", "NDR"]:
             body, info = self._status_email(courier_status=raw)
             self.assertEqual(info["status_source"], "courier")
             self.assertIn(f"Status: {raw}", body, f"{raw!r} was altered")
+
+    def test_rto_courier_statuses_labelled_rto(self):
+        # Every RTO variant is presented as 'Return To Origin (RTO)' with the return note --
+        # and the courier status is used (never Shopify 'fulfilled').
+        for raw in ["RTO", "RTO In Transit", "RTO Delivered", "Return To Origin"]:
+            body, info = self._status_email(courier_status=raw, fulfillment="fulfilled")
+            self.assertEqual(info["status_source"], "courier", raw)
+            self.assertIn("Status: Return To Origin (RTO)", body, f"{raw!r} not mapped")
+            self.assertIn("Your shipment is currently being returned to the seller.", body)
+            self.assertNotIn("fulfilled", body.lower())
+
+    def test_courier_status_used_over_shopify_fulfilled(self):
+        # The reported bug: Shopify says 'fulfilled' but the courier says Return To Origin ->
+        # the email must show RTO (never 'fulfilled'), the return note, and the RTO refund status.
+        order = {"shipped": True, "awb": "AWB9", "tracking_url": "https://track/AWB9",
+                 "raw_fulfillment_status": "fulfilled", "financial_status": "paid"}
+        ship = FakeShipping({"AWB9": {"raw_status": "Return To Origin", "awb": "AWB9"}})
+        info = lookup_tracking(self.brand, "486324", clients=self._clients(
+            shopify=FakeShopify({"486324": order}), shipping=ship))
+        self.assertEqual(info["status_source"], "courier")            # courier beats fulfillment
+        body = service._format_tracking_details(info)
+        self.assertIn("Status: Return To Origin (RTO)", body)
+        self.assertNotIn("fulfilled", body.lower())
+        self.assertIn("Your shipment is currently being returned to the seller.", body)
+        self.assertIn("Refund Status: Pending verification after returned shipment reaches "
+                      "the warehouse.", body)
+
+    def test_status_mapping_table(self):
+        # The required mapping: identity for all except Return To Origin -> Return To Origin (RTO).
+        for raw, shown in [("Delivered", "Delivered"), ("In Transit", "In Transit"),
+                           ("Out For Delivery", "Out For Delivery"),
+                           ("Return To Origin", "Return To Origin (RTO)"),
+                           ("Returned", "Returned"), ("Cancelled", "Cancelled")]:
+            with self.subTest(raw=raw):
+                body = service._format_tracking_details(
+                    {"order_id": "1", "raw_status": raw, "refund_status": "Not Applicable"})
+                self.assertIn(f"Status: {shown}", body)
 
     def test_raw_shopify_fulfillment_status_shown_when_no_courier(self):
         body, info = self._status_email(fulfillment="Unfulfilled")
@@ -326,14 +363,16 @@ class LookupTrackingTests(TestCase):
         # never overridden by Shopify fulfillment_status='fulfilled'.
         order = {"shipped": True, "raw_fulfillment_status": "fulfilled",
                  "financial_status": "paid", "cancelled_at": None}
+        display = {"RTO": "Return To Origin (RTO)"}   # RTO is the only mapped label
         for status in ["Cancelled", "NDR", "RTO", "Delivered", "Out For Delivery", "In Transit"]:
             cp = {"shipment_status": status, "order_status": status, "tracking_url": "", "awb": ""}
             with self._with_care_panel(cp):
                 info = lookup_tracking(self.brand, "486324",
                                        clients=self._clients(shopify=FakeShopify({"486324": order})))
             self.assertEqual(info["status_source"], "care_panel_shipment", status)
-            self.assertEqual(info["raw_status"], status, status)
-            self.assertIn(f"Status: {status}", service._format_tracking_details(info), status)
+            self.assertEqual(info["raw_status"], status, status)   # raw_status kept verbatim
+            shown = display.get(status, status)
+            self.assertIn(f"Status: {shown}", service._format_tracking_details(info), status)
 
     def test_verification_orders_262098591_cancelled_262146052_ndr(self):
         # The two reported orders, end to end (Shopify says fulfilled for both).
