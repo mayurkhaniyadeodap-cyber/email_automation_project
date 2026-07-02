@@ -131,8 +131,27 @@ class ConversationSectionTests(TestCase):
         self.assertEqual(convo[0]["sender_name"], "Rahul")                     # verified name
         self.assertEqual(convo[1]["sender_name"], "DeoDap Support")
         self.assertEqual(convo[0]["email"], "buyer@example.com")
+        self.assertEqual(convo[0]["subject"], "where is my order")             # subject shown
         self.assertEqual(convo[2]["attachments"][0]["kind"], "image")
         self.assertIn("id=hash123", convo[2]["attachments"][0]["url"])
+
+    def test_customer_name_is_shopify_verified_never_gmail_name(self):
+        # No shopify_verified source -> customer name is 'Unknown', NEVER the Gmail sender name.
+        from apps.tickets.tracking import _build_conversation
+        from apps.tickets.serializers import TicketDetailSerializer
+        from apps.tickets.models import Message
+        t = Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="someone@gmail.com", subject="hi",
+            extracted={"tracking_hash": "h9", "name": "Gmail Display Name",
+                       "sender_name": "Gmail Display Name"})   # NOT shopify_verified
+        Message.objects.create(ticket=t, direction=Message.DIRECTION_INBOUND,
+                               from_email="someone@gmail.com", subject="hi", body_text="hello")
+        convo = _build_conversation(t, "h9")
+        self.assertEqual(convo[0]["sender_name"], "Unknown")
+        self.assertNotEqual(convo[0]["sender_name"], "Gmail Display Name")
+        self.assertEqual(TicketDetailSerializer(t).data["conversation"][0]["sender_name"],
+                         "Unknown")
 
     def test_ticket_detail_api_adds_conversation_and_keeps_existing_fields(self):
         from apps.tickets.serializers import TicketDetailSerializer

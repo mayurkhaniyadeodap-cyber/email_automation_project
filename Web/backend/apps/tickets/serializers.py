@@ -139,11 +139,12 @@ class TicketDetailSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerialize
                 "url": f"/api/attachments/{a.id}/",
             } for a in m.stored_attachments.all().order_by("created_at")]
             convo.append({
-                "sender_name": ("DeoDap Support" if not inbound
-                                else (owner if owner != "Unknown"
-                                      else _sender_name(obj) or "Customer")),
+                # Customer name = the Shopify-VERIFIED order owner, else 'Unknown' -- never the
+                # Gmail sender display name / From header / alias.
+                "sender_name": "DeoDap Support" if not inbound else owner,
                 "sender_type": "Customer" if inbound else "DeoDap Support",
                 "email": m.from_email or "",
+                "subject": (m.subject or "").strip(),
                 "datetime": m.sent_at or m.created_at,
                 "body": (m.body_text or "").strip(),
                 "attachments": atts,

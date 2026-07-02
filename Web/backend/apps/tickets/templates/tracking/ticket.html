@@ -168,6 +168,7 @@
             <span class="tl-when">{{ c.when|date:"d M Y, H:i" }}</span>
           </div>
           {% if c.email %}<div class="small text-muted mb-1">{{ c.email }}</div>{% endif %}
+          {% if c.subject %}<div class="fw-semibold mb-1">{{ c.subject }}</div>{% endif %}
           {% if c.body %}<div style="white-space:pre-wrap;">{{ c.body }}</div>{% endif %}
           {% if c.attachments %}
           <div class="row g-2 mt-2">

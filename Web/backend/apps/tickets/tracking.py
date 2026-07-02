@@ -133,13 +133,22 @@ def _build_timeline(ticket):
     return events
 
 
+def _verified_customer_name(ticket):
+    """The Shopify-VERIFIED order-owner name for a customer message, else 'Unknown'. NEVER the
+    Gmail sender display name / From header / alias (matches serializers._owner_name)."""
+    ex = ticket.extracted or {}
+    if ex.get("customer_name") and ex.get("customer_name_source") == "shopify_verified":
+        return ex["customer_name"]
+    return "Unknown"
+
+
 def _build_conversation(ticket, hash_id):
     """The COMPLETE email conversation (every non-draft inbound + outbound message) in
     chronological order. Each entry carries the sender name, sender type (Customer / DeoDap
-    Support), email address, timestamp, body and its own attachments. Additive: this does NOT
-    touch the milestone timeline. New replies (customer or support) appear automatically because
-    it is rebuilt from ticket.messages on every load."""
-    cust_name = _customer(ticket)["name"]
+    Support), email address, subject, timestamp, body and its own attachments. Additive: this
+    does NOT touch the milestone timeline. New replies (customer or support) appear automatically
+    because it is rebuilt from ticket.messages on every load."""
+    cust_name = _verified_customer_name(ticket)     # Shopify-verified name, else 'Unknown'
     convo = []
     for m in ticket.messages.all().order_by("created_at"):
         if m.is_draft:
@@ -155,6 +164,7 @@ def _build_conversation(ticket, hash_id):
             "sender_type": "Customer" if inbound else "DeoDap Support",
             "is_customer": inbound,
             "email": m.from_email or "",
+            "subject": (m.subject or "").strip(),
             "when": m.sent_at or m.created_at,
             "body": (m.body_text or "").strip(),
             "attachments": atts,
