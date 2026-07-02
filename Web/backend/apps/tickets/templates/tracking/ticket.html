@@ -131,28 +131,6 @@
     </div>
   </div>
 
-  <!-- 3. ACTIVITY TIMELINE (milestone events -- Ticket Created / Evidence Received / etc.) -->
-  <div class="card shadow-sm border-0 mb-3">
-    <div class="card-body">
-      <div class="label mb-3">Activity Timeline</div>
-      {% if timeline %}
-      <div class="tl">
-        {% for e in timeline %}
-        <div class="tl-item {% if e.is_customer %}customer{% elif e.is_event %}event{% endif %}">
-          <span class="tl-dot"></span>
-          <div class="d-flex justify-content-between">
-            <span class="fw-semibold">{{ e.sender }}</span>
-            <span class="tl-when">{{ e.when|date:"d M Y, H:i" }}</span>
-          </div>
-          <div class="{% if e.is_event %}text-muted{% endif %}" style="white-space:pre-wrap;">{{ e.text }}</div>
-        </div>
-        {% endfor %}
-      </div>
-      {% else %}
-        <div class="text-muted small">No conversation yet.</div>
-      {% endif %}
-    </div>
-  </div>
 
   <!-- 5. CONVERSATION (complete email thread: customer <-> DeoDap Support, with attachments) -->
   <div class="card shadow-sm border-0 mb-3">

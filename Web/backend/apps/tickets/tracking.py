@@ -133,22 +133,15 @@ def _build_timeline(ticket):
     return events
 
 
-def _verified_customer_name(ticket):
-    """The Shopify-VERIFIED order-owner name for a customer message, else 'Unknown'. NEVER the
-    Gmail sender display name / From header / alias (matches serializers._owner_name)."""
-    ex = ticket.extracted or {}
-    if ex.get("customer_name") and ex.get("customer_name_source") == "shopify_verified":
-        return ex["customer_name"]
-    return "Unknown"
-
-
 def _build_conversation(ticket, hash_id):
     """The COMPLETE email conversation (every non-draft inbound + outbound message) in
     chronological order. Each entry carries the sender name, sender type (Customer / DeoDap
-    Support), email address, subject, timestamp, body and its own attachments. Additive: this
-    does NOT touch the milestone timeline. New replies (customer or support) appear automatically
-    because it is rebuilt from ticket.messages on every load."""
-    cust_name = _verified_customer_name(ticket)     # Shopify-verified name, else 'Unknown'
+    Support), email address, subject, timestamp, body (quoted thread history stripped) and its
+    own attachments. New replies appear automatically because it is rebuilt from ticket.messages
+    on every load."""
+    from apps.ingestion.service import _clean_reply     # strips 'On ... wrote:' / '>' history
+
+    cust_name = _customer(ticket)["name"]               # Shopify-verified name, else sender
     convo = []
     for m in ticket.messages.all().order_by("created_at"):
         if m.is_draft:
@@ -166,7 +159,7 @@ def _build_conversation(ticket, hash_id):
             "email": m.from_email or "",
             "subject": (m.subject or "").strip(),
             "when": m.sent_at or m.created_at,
-            "body": (m.body_text or "").strip(),
+            "body": _clean_reply(m.body_text or "").strip(),   # only the newly written content
             "attachments": atts,
         })
     return convo
@@ -183,11 +176,22 @@ def _build_progress(ticket):
 
 
 def _customer(ticket):
-    extracted = ticket.extracted or {}
-    name = extracted.get("name") or (ticket.customer_email or "Customer").split("@")[0]
+    """Customer identity for the portal. After Shopify verification succeeds, ALWAYS use the
+    verified order owner (name / email / phone / order number) -- NEVER the email sender display
+    name or the email username. Fall back to the sender only when there is NO verified Shopify
+    order."""
+    ex = ticket.extracted or {}
+    verified = bool(ex.get("customer_name")
+                    and ex.get("customer_name_source") == "shopify_verified")
+    if verified:
+        name = ex["customer_name"]
+        email = ex.get("customer_email") or ticket.customer_email or ""
+    else:
+        name = (ticket.customer_email or "Customer").split("@")[0]   # sender fallback (username)
+        email = ticket.customer_email or ""
     return {
-        "name": name, "email": ticket.customer_email or "",
-        "phone": extracted.get("phone") or "", "order_id": extracted.get("order_id") or "",
+        "name": name, "email": email,
+        "phone": ex.get("phone") or "", "order_id": ex.get("order_id") or "",
     }
 
 
@@ -244,7 +248,6 @@ def tracking_page(request):
                                         else "General"),
         "issue": ticket.issue_summary or ticket.subject or "-",
         "customer": _customer(ticket),
-        "timeline": _build_timeline(ticket),
         "conversation": _build_conversation(ticket, hash_id),
         "media": _build_media(ticket, hash_id),
         "progress": _build_progress(ticket),

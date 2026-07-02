@@ -135,9 +135,31 @@ class ConversationSectionTests(TestCase):
         self.assertEqual(convo[2]["attachments"][0]["kind"], "image")
         self.assertIn("id=hash123", convo[2]["attachments"][0]["url"])
 
-    def test_customer_name_is_shopify_verified_never_gmail_name(self):
-        # No shopify_verified source -> customer name is 'Unknown', NEVER the Gmail sender name.
-        from apps.tickets.tracking import _build_conversation
+    def test_customer_info_uses_shopify_verified_identity(self):
+        # After Shopify verification: name/email come from the verified order owner, NEVER the
+        # email username. (Reported bug: verified ticket still showed the sender username.)
+        from apps.tickets.tracking import _customer, _build_conversation
+        t = Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="dabhichintan2134@gmail.com", subject="Damage order",
+            extracted={"tracking_hash": "hv", "customer_name": "Aayat .",
+                       "customer_name_source": "shopify_verified",
+                       "customer_email": "aayat@shopcust.com", "phone": "9140505423",
+                       "order_id": "262277643"})
+        from apps.tickets.models import Message
+        Message.objects.create(ticket=t, direction=Message.DIRECTION_INBOUND,
+                               from_email="dabhichintan2134@gmail.com", body_text="hi")
+        c = _customer(t)
+        self.assertEqual(c["name"], "Aayat .")                 # Shopify name, NOT 'dabhichintan2134'
+        self.assertNotEqual(c["name"], "dabhichintan2134")
+        self.assertEqual(c["email"], "aayat@shopcust.com")     # verified email
+        self.assertEqual(c["phone"], "9140505423")
+        self.assertEqual(c["order_id"], "262277643")
+        self.assertEqual(_build_conversation(t, "hv")[0]["sender_name"], "Aayat .")
+
+    def test_unverified_customer_name_is_username_never_display_name(self):
+        # No verified order -> fall back to the email USERNAME, never the Gmail display name.
+        from apps.tickets.tracking import _customer, _build_conversation
         from apps.tickets.serializers import TicketDetailSerializer
         from apps.tickets.models import Message
         t = Ticket.objects.create(
@@ -147,11 +169,42 @@ class ConversationSectionTests(TestCase):
                        "sender_name": "Gmail Display Name"})   # NOT shopify_verified
         Message.objects.create(ticket=t, direction=Message.DIRECTION_INBOUND,
                                from_email="someone@gmail.com", subject="hi", body_text="hello")
-        convo = _build_conversation(t, "h9")
-        self.assertEqual(convo[0]["sender_name"], "Unknown")
-        self.assertNotEqual(convo[0]["sender_name"], "Gmail Display Name")
+        self.assertEqual(_customer(t)["name"], "someone")      # username fallback
+        self.assertEqual(_build_conversation(t, "h9")[0]["sender_name"], "someone")
+        self.assertNotEqual(_build_conversation(t, "h9")[0]["sender_name"], "Gmail Display Name")
         self.assertEqual(TicketDetailSerializer(t).data["conversation"][0]["sender_name"],
-                         "Unknown")
+                         "someone")
+
+    def test_conversation_strips_gmail_quoted_history(self):
+        from apps.tickets.tracking import _build_conversation
+        from apps.tickets.models import Message
+        Message.objects.create(
+            ticket=self.ticket, direction=Message.DIRECTION_INBOUND,
+            from_email="buyer@example.com", body_text=(
+                "Attached the photo.\n\n"
+                "On Thu, Jul 2, 2026 at 10:00 AM DeoDap Support <care@deodap.com> wrote:\n"
+                "> Please upload a clear photo.\n> Regards, DeoDap"))
+        convo = _build_conversation(self.ticket, "hash123")
+        body = convo[0]["body"]
+        self.assertIn("Attached the photo.", body)
+        self.assertNotIn("wrote:", body)
+        self.assertNotIn("Please upload a clear photo", body)
+
+    def test_activity_timeline_removed_from_portal(self):
+        from django.template.loader import render_to_string
+        from apps.tickets import tracking as T
+        self._seed()
+        ctx = {"ticket": self.ticket, "hash_id": "hash123", "number": "N1",
+               "status_label": "In process", "status_code": self.ticket.status,
+               "status_badge": "primary", "category": "General", "issue": "x",
+               "customer": T._customer(self.ticket),
+               "conversation": T._build_conversation(self.ticket, "hash123"),
+               "media": T._build_media(self.ticket, "hash123"),
+               "progress": T._build_progress(self.ticket), "sent": False}
+        html = render_to_string("tracking/ticket.html", ctx)
+        self.assertNotIn("Activity Timeline", html)            # timeline removed
+        self.assertIn(">Conversation<", html.replace(" ", ""))  # conversation kept
+        self.assertIn("Media Files", html)                     # media kept
 
     def test_ticket_detail_api_adds_conversation_and_keeps_existing_fields(self):
         from apps.tickets.serializers import TicketDetailSerializer

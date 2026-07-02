@@ -127,7 +127,14 @@ class TicketDetailSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerialize
     conversation = serializers.SerializerMethodField()
 
     def get_conversation(self, obj):
-        owner = _owner_name(obj)
+        from apps.ingestion.service import _clean_reply    # strips quoted 'On ... wrote:' history
+
+        # Customer name = the Shopify-VERIFIED order owner; fall back to the email username ONLY
+        # when there is no verified order -- never the Gmail sender display name / From header.
+        ex = obj.extracted or {}
+        cust_name = (ex["customer_name"] if ex.get("customer_name")
+                     and ex.get("customer_name_source") == "shopify_verified"
+                     else (obj.customer_email or "Customer").split("@")[0])
         convo = []
         for m in obj.messages.all().order_by("created_at"):
             if m.is_draft:
@@ -139,14 +146,12 @@ class TicketDetailSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerialize
                 "url": f"/api/attachments/{a.id}/",
             } for a in m.stored_attachments.all().order_by("created_at")]
             convo.append({
-                # Customer name = the Shopify-VERIFIED order owner, else 'Unknown' -- never the
-                # Gmail sender display name / From header / alias.
-                "sender_name": "DeoDap Support" if not inbound else owner,
+                "sender_name": cust_name if inbound else "DeoDap Support",
                 "sender_type": "Customer" if inbound else "DeoDap Support",
                 "email": m.from_email or "",
                 "subject": (m.subject or "").strip(),
                 "datetime": m.sent_at or m.created_at,
-                "body": (m.body_text or "").strip(),
+                "body": _clean_reply(m.body_text or "").strip(),   # only newly written content
                 "attachments": atts,
             })
         return convo
