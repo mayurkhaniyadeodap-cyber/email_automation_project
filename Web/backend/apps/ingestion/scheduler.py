@@ -100,6 +100,13 @@ def start():
             fetch_all_mailboxes, "interval", minutes=fetch_minutes,
             id="auto_fetch_mail", replace_existing=True, max_instances=1, coalesce=True,
         )
+    else:
+        # AUTO_FETCH_MINUTES <= 0 -> auto-fetch is OFF. Manual "Fetch Mail" still works and the
+        # waiting-sweep below is unaffected. (On the live server the in-process scheduler doesn't
+        # run under gunicorn anyway -- cron drives fetch there, so also remove the fetch cron.)
+        logger.info("Auto-fetch DISABLED (AUTO_FETCH_MINUTES=%d <= 0): scheduler will NOT "
+                    "auto-fetch mail; manual Fetch Mail + waiting-sweep still active.",
+                    fetch_minutes)
     if sweep_minutes > 0:
         _scheduler.add_job(
             sweep_waiting_states, "interval", minutes=sweep_minutes,
