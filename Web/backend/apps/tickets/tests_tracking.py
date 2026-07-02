@@ -224,6 +224,29 @@ class ConversationSectionTests(TestCase):
         from apps.tickets.tracking import _build_conversation
         self.assertEqual(_build_conversation(self.ticket, "hash123"), [])
 
+    @override_settings(PUBLIC_BASE_URL="https://care.deodap.info/email_automation")
+    def test_conversation_json_endpoint_reuses_portal_logic(self):
+        # The JSON feed for the external admin's Conversation tab returns the SAME thread the
+        # portal builds (same _build_conversation / _customer), resolvable by the tracking hash.
+        import json
+        from django.test import RequestFactory
+        from apps.tickets.tracking import conversation_json, _build_conversation
+        self._seed()
+        resp = conversation_json(RequestFactory().get("/t/conversation", {"id": "hash123"}))
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertEqual(len(data["conversation"]),
+                         len(_build_conversation(self.ticket, "hash123")))     # identical thread
+        self.assertEqual(data["conversation"][0]["sender_type"], "Customer")
+        self.assertEqual(data["conversation"][1]["sender_type"], "DeoDap Support")
+        self.assertEqual(data["customer"]["name"], "Rahul")                    # Shopify-verified
+        self.assertTrue(data["conversation"][2]["attachments"][0]["url"].startswith("http"))
+        self.assertEqual(resp["Access-Control-Allow-Origin"], "*")
+        # unknown id -> 404
+        self.assertEqual(
+            conversation_json(RequestFactory().get("/t/conversation", {"id": "nope"})).status_code,
+            404)
+
 
 class TrackingPortalTests(TestCase):
     """The redesigned portal: header, customer info, timeline, media, progress, reply."""

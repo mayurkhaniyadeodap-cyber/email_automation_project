@@ -4,7 +4,7 @@ from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
 
-from apps.tickets.tracking import tracking_file, tracking_page
+from apps.tickets.tracking import conversation_json, tracking_file, tracking_page
 
 
 def root(_request):
@@ -29,4 +29,7 @@ urlpatterns = [
     # Public customer tracking portal (internal-fallback tracking links point here).
     path("t", tracking_page, name="tracking-page"),
     path("t/file", tracking_file, name="tracking-file"),   # scoped media serving
+    # JSON conversation feed for the external Care Panel admin's Conversation tab (same data
+    # as the customer portal; reuses _build_conversation).
+    path("t/conversation", conversation_json, name="tracking-conversation"),
 ]

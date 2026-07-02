@@ -11,7 +11,7 @@ resolved ticket so one hash can't read another ticket's files.
 
 import logging
 
-from django.http import FileResponse, HttpResponse, HttpResponseRedirect
+from django.http import FileResponse, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import render
 
 from apps.tickets.models import Attachment, AuditLogEntry, Message, Ticket
@@ -254,6 +254,37 @@ def tracking_page(request):
         "sent": request.GET.get("sent") == "1",
     }
     return render(request, "tracking/ticket.html", ctx)
+
+
+def conversation_json(request):
+    """JSON feed of the SAME conversation the customer portal renders (built by the SAME
+    _build_conversation / _customer helpers -- no duplicated logic). For the external Care
+    Panel admin's 'Conversation' tab. Resolve by ?id=<tracking_hash | care_panel_ticket_id>.
+    Attachment URLs are absolute so a different host can load them. Read-only; unguessable id."""
+    from urllib.parse import urlparse
+
+    from django.conf import settings
+
+    hash_id = (request.GET.get("id") or "").strip()
+    ticket = _resolve_ticket(hash_id)
+    if ticket is None:
+        return JsonResponse({"detail": "not found"}, status=404)
+    convo = _build_conversation(ticket, hash_id)
+    # Make attachment URLs absolute (the admin lives on a different host than this app).
+    base = (getattr(settings, "PUBLIC_BASE_URL", "") or "").strip()
+    p = urlparse(base) if base else None
+    origin = f"{p.scheme}://{p.netloc}" if p and p.scheme and p.netloc else ""
+    for m in convo:
+        for a in m["attachments"]:
+            if origin and a["url"].startswith("/"):
+                a["url"] = origin + a["url"]
+    resp = JsonResponse({
+        "ticket": ticket.ticket_number or ticket.ticket_id,
+        "customer": _customer(ticket),
+        "conversation": convo,
+    })
+    resp["Access-Control-Allow-Origin"] = "*"   # let the external Care Panel admin fetch it
+    return resp
 
 
 def tracking_file(request):
