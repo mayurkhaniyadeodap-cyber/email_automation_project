@@ -4,7 +4,7 @@ Tests for the M1–M7 outbound mail registry (EN/HI/GU language auto-pick).
     python manage.py test apps.ingestion.tests_mails
 """
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from apps.ingestion import mails
 
@@ -105,10 +105,11 @@ class EvidenceComplaintRefTests(TestCase):
         self.assertEqual(mails.normalize_lang(None), "en")
 
 
+@override_settings(PUBLIC_BASE_URL="https://care.deodap.info/email_automation")
 class ConfirmationTrackingLinkTests(TestCase):
     """Every ticket confirmation email (created / updated / duplicate-found) must carry the
-    SAME tracking URL when the ticket has a real Care Panel hash (the reported bug: update
-    emails dropped the link)."""
+    SAME tracking URL. The customer link now points at OUR /t portal (which shows the full
+    Conversation), not the external Care Panel."""
 
     def setUp(self):
         from apps.organizations.models import Organization, Brand, Mailbox
@@ -134,7 +135,7 @@ class ConfirmationTrackingLinkTests(TestCase):
         t = self._ticket(care_hash="ABChash123")
         service.send_confirmation(t, "updated")
         body = self._last_outbound(t).body_text
-        self.assertIn("https://care.deodap.in/t?id=ABChash123", body)
+        self.assertIn("https://care.deodap.info/email_automation/t?id=ABChash123", body)
         self.assertIn("TKT-2026-000163", body)
 
     def test_created_and_updated_share_same_link(self):
@@ -147,4 +148,4 @@ class ConfirmationTrackingLinkTests(TestCase):
                       .values_list("body_text", flat=True))
         self.assertEqual(len(bodies), 2)
         for b in bodies:
-            self.assertIn("https://care.deodap.in/t?id=ABChash123", b)
+            self.assertIn("https://care.deodap.info/email_automation/t?id=ABChash123", b)
