@@ -14,8 +14,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 
-const POLL_MS = 20000; // 20s.
-
 export function useInboxNotifications(orgId, brandId, modules, enabled = true) {
   const [counts, setCounts] = useState({});   // { [key]: number }
   const [toast, setToast] = useState(null);   // current toast item, or null
@@ -85,17 +83,13 @@ export function useInboxNotifications(orgId, brandId, modules, enabled = true) {
     setCounts({});
   }, [orgId, brandId]);
 
-  // Poll immediately, then on an interval; also refresh when the tab regains focus.
+  // Live auto-updating is DISABLED: load once on page open / scope change only -- no recurring
+  // interval and no refresh-on-tab-focus. Badges refresh on a page reload or an explicit
+  // refresh() (e.g. after Fetch Mail); the panel is otherwise static until the user acts.
   useEffect(() => {
     if (!enabled || !brandId || !modules.length) { setCounts({}); return undefined; }
     refresh();
-    const id = setInterval(refresh, POLL_MS);
-    const onVis = () => { if (!document.hidden) refresh(); };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", onVis);
-    };
+    return undefined;
   }, [enabled, brandId, modules, refresh]);
 
   const total = Object.values(counts).reduce((a, b) => a + (b || 0), 0);
