@@ -7,6 +7,7 @@ pointed at the external care.deodap.in instead of our own /t route).
 """
 
 from django.test import Client, TestCase, override_settings  # type: ignore
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from apps.ingestion import service
@@ -87,6 +88,69 @@ class TrackingPageTests(TestCase):
         self.assertEqual(t.extracted.get("tracking_hash"), "CP123")  # hash recorded
         # and the real Care Panel hash resolves on our page too
         self.assertEqual(self.client.get("/t?id=CP123").status_code, 200)
+
+
+class ConversationSectionTests(TestCase):
+    """The NEW Conversation section: the complete email thread built from the ticket's messages
+    (sender name/type, email, datetime, body, per-message attachments). Tested directly (no HTTP
+    client) so it is independent of the Django test-client / Python version."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="DeoDap")
+        self.brand = Brand.objects.create(organization=self.org, name="DeoDap.in")
+        self.mailbox = Mailbox.objects.create(brand=self.brand, email_address="care@deodap.com")
+        self.ticket = Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="buyer@example.com", subject="where is my order",
+            extracted={"tracking_hash": "hash123", "customer_name": "Rahul",
+                       "customer_name_source": "shopify_verified"})
+
+    def _seed(self):
+        from apps.tickets.models import Message, Attachment
+        Message.objects.create(ticket=self.ticket, direction=Message.DIRECTION_INBOUND,
+                               from_email="buyer@example.com", subject="where is my order",
+                               body_text="Where is my order?")               # 1 initial customer
+        Message.objects.create(ticket=self.ticket, direction=Message.DIRECTION_OUTBOUND,
+                               from_email="care@deodap.com", subject="Re: where is my order",
+                               body_text="Here is your status.")             # 2 support reply
+        m3 = Message.objects.create(ticket=self.ticket, direction=Message.DIRECTION_INBOUND,
+                                    from_email="buyer@example.com", body_text="Photo attached.")
+        a = Attachment(ticket=self.ticket, message=m3, filename="photo.png",
+                       content_type="image/png", size=3)
+        a.file.save("photo.png", ContentFile(b"IMG"), save=True)              # 3 customer + image
+        Message.objects.create(ticket=self.ticket, direction=Message.DIRECTION_OUTBOUND,
+                               from_email="care@deodap.com", body_text="draft", is_draft=True)  # excluded
+
+    def test_build_conversation_full_thread_with_attachment(self):
+        from apps.tickets.tracking import _build_conversation
+        self._seed()
+        convo = _build_conversation(self.ticket, "hash123")
+        self.assertEqual(len(convo), 3)                                        # draft excluded
+        self.assertEqual([c["sender_type"] for c in convo],
+                         ["Customer", "DeoDap Support", "Customer"])           # chronological
+        self.assertEqual(convo[0]["sender_name"], "Rahul")                     # verified name
+        self.assertEqual(convo[1]["sender_name"], "DeoDap Support")
+        self.assertEqual(convo[0]["email"], "buyer@example.com")
+        self.assertEqual(convo[2]["attachments"][0]["kind"], "image")
+        self.assertIn("id=hash123", convo[2]["attachments"][0]["url"])
+
+    def test_ticket_detail_api_adds_conversation_and_keeps_existing_fields(self):
+        from apps.tickets.serializers import TicketDetailSerializer
+        self._seed()
+        data = TicketDetailSerializer(self.ticket).data
+        # NEW field present + correct
+        self.assertIn("conversation", data)
+        self.assertEqual(len(data["conversation"]), 3)
+        self.assertEqual(data["conversation"][0]["sender_type"], "Customer")
+        self.assertEqual(data["conversation"][1]["sender_type"], "DeoDap Support")
+        self.assertEqual(data["conversation"][2]["attachments"][0]["filename"], "photo.png")
+        # BACKWARD COMPATIBILITY: existing fields untouched
+        for f in ("id", "ticket_id", "messages", "audit_log", "status", "customer_email"):
+            self.assertIn(f, data)
+
+    def test_conversation_empty_when_no_messages(self):
+        from apps.tickets.tracking import _build_conversation
+        self.assertEqual(_build_conversation(self.ticket, "hash123"), [])
 
 
 class TrackingPortalTests(TestCase):

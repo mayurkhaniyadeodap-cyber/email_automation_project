@@ -124,6 +124,35 @@ def _build_timeline(ticket):
     return events
 
 
+def _build_conversation(ticket, hash_id):
+    """The COMPLETE email conversation (every non-draft inbound + outbound message) in
+    chronological order. Each entry carries the sender name, sender type (Customer / DeoDap
+    Support), email address, timestamp, body and its own attachments. Additive: this does NOT
+    touch the milestone timeline. New replies (customer or support) appear automatically because
+    it is rebuilt from ticket.messages on every load."""
+    cust_name = _customer(ticket)["name"]
+    convo = []
+    for m in ticket.messages.all().order_by("created_at"):
+        if m.is_draft:
+            continue                               # unsent drafts are internal-only
+        inbound = m.direction == Message.DIRECTION_INBOUND
+        atts = [{
+            "filename": att.filename, "kind": _media_kind(att),
+            "content_type": att.content_type or "application/octet-stream",
+            "url": f"/t/file?id={hash_id}&a={att.id}",
+        } for att in m.stored_attachments.all().order_by("created_at")]
+        convo.append({
+            "sender_name": cust_name if inbound else "DeoDap Support",
+            "sender_type": "Customer" if inbound else "DeoDap Support",
+            "is_customer": inbound,
+            "email": m.from_email or "",
+            "when": m.sent_at or m.created_at,
+            "body": (m.body_text or "").strip(),
+            "attachments": atts,
+        })
+    return convo
+
+
 def _build_progress(ticket):
     idx = _STATUS_STAGE.get(ticket.status, 0)
     extracted = ticket.extracted or {}
@@ -197,6 +226,7 @@ def tracking_page(request):
         "issue": ticket.issue_summary or ticket.subject or "-",
         "customer": _customer(ticket),
         "timeline": _build_timeline(ticket),
+        "conversation": _build_conversation(ticket, hash_id),
         "media": _build_media(ticket, hash_id),
         "progress": _build_progress(ticket),
         "sent": request.GET.get("sent") == "1",

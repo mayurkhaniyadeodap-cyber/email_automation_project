@@ -121,6 +121,34 @@ class TicketDetailSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerialize
     )
     messages = MessageSerializer(many=True, read_only=True)
     audit_log = AuditLogEntrySerializer(many=True, read_only=True)
+    # ADDITIVE, backward-compatible: the complete email thread (customer <-> DeoDap Support) in
+    # chronological order, each entry with sender name/type, email, datetime, body and its
+    # attachments. Built from the ticket's linked messages -- new replies appear automatically.
+    conversation = serializers.SerializerMethodField()
+
+    def get_conversation(self, obj):
+        owner = _owner_name(obj)
+        convo = []
+        for m in obj.messages.all().order_by("created_at"):
+            if m.is_draft:
+                continue                                   # unsent drafts stay internal
+            inbound = m.direction == Message.DIRECTION_INBOUND
+            atts = [{
+                "id": a.id, "filename": a.filename,
+                "content_type": a.content_type or "",
+                "url": f"/api/attachments/{a.id}/",
+            } for a in m.stored_attachments.all().order_by("created_at")]
+            convo.append({
+                "sender_name": ("DeoDap Support" if not inbound
+                                else (owner if owner != "Unknown"
+                                      else _sender_name(obj) or "Customer")),
+                "sender_type": "Customer" if inbound else "DeoDap Support",
+                "email": m.from_email or "",
+                "datetime": m.sent_at or m.created_at,
+                "body": (m.body_text or "").strip(),
+                "attachments": atts,
+            })
+        return convo
 
     class Meta:
         model = Ticket
@@ -131,7 +159,7 @@ class TicketDetailSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerialize
             "sub_topic_ref", "action_taken", "status", "status_display", "priority",
             "priority_display", "ai_confidence", "ai_handled", "language",
             "sentiment", "mandatory_inputs", "extracted", "is_ignored",
-            "ignored_reason", "sla_due_at", "messages", "audit_log",
+            "ignored_reason", "sla_due_at", "messages", "audit_log", "conversation",
             "created_at", "updated_at",
         ]
         read_only_fields = ["ticket_id"]

@@ -131,10 +131,10 @@
     </div>
   </div>
 
-  <!-- 3. CONVERSATION TIMELINE -->
+  <!-- 3. ACTIVITY TIMELINE (milestone events -- Ticket Created / Evidence Received / etc.) -->
   <div class="card shadow-sm border-0 mb-3">
     <div class="card-body">
-      <div class="label mb-3">Conversation</div>
+      <div class="label mb-3">Activity Timeline</div>
       {% if timeline %}
       <div class="tl">
         {% for e in timeline %}
@@ -145,6 +145,51 @@
             <span class="tl-when">{{ e.when|date:"d M Y, H:i" }}</span>
           </div>
           <div class="{% if e.is_event %}text-muted{% endif %}" style="white-space:pre-wrap;">{{ e.text }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+        <div class="text-muted small">No conversation yet.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- 5. CONVERSATION (complete email thread: customer <-> DeoDap Support, with attachments) -->
+  <div class="card shadow-sm border-0 mb-3">
+    <div class="card-body">
+      <div class="label mb-3">Conversation</div>
+      {% if conversation %}
+      <div class="tl">
+        {% for c in conversation %}
+        <div class="tl-item {% if c.is_customer %}customer{% endif %}">
+          <span class="tl-dot"></span>
+          <div class="d-flex justify-content-between align-items-baseline flex-wrap">
+            <span class="fw-semibold">{{ c.sender_name }} <span class="text-muted small">({{ c.sender_type }})</span></span>
+            <span class="tl-when">{{ c.when|date:"d M Y, H:i" }}</span>
+          </div>
+          {% if c.email %}<div class="small text-muted mb-1">{{ c.email }}</div>{% endif %}
+          {% if c.body %}<div style="white-space:pre-wrap;">{{ c.body }}</div>{% endif %}
+          {% if c.attachments %}
+          <div class="row g-2 mt-2">
+            {% for a in c.attachments %}
+              <div class="col-6 col-lg-4">
+                {% if a.kind == "image" %}
+                  <a class="media-link" href="{{ a.url }}" target="_blank" title="{{ a.filename }}">
+                    <img class="media-thumb" src="{{ a.url }}" alt="{{ a.filename }}">
+                  </a>
+                {% elif a.kind == "video" %}
+                  <video class="media-thumb" controls preload="metadata">
+                    <source src="{{ a.url }}" type="{{ a.content_type }}">
+                  </video>
+                {% else %}
+                  <a class="media-link d-flex align-items-center justify-content-center media-thumb bg-light text-secondary"
+                     href="{{ a.url }}" target="_blank" title="{{ a.filename }}">📄 File</a>
+                {% endif %}
+                <div class="small text-truncate text-muted mt-1" title="{{ a.filename }}">{{ a.filename }}</div>
+              </div>
+            {% endfor %}
+          </div>
+          {% endif %}
         </div>
         {% endfor %}
       </div>
