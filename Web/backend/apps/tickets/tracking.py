@@ -81,6 +81,15 @@ def _media_kind(att):
     return "file"
 
 
+def _file_url(hash_id, att_id):
+    """Scoped media URL, prefixed with the app's script name so it resolves under a sub-path
+    deploy (e.g. /email_automation/t/file) as well as at the root."""
+    from django.conf import settings
+
+    prefix = (getattr(settings, "FORCE_SCRIPT_NAME", "") or "").rstrip("/")
+    return f"{prefix}/t/file?id={hash_id}&a={att_id}"
+
+
 def _build_media(ticket, hash_id):
     items = []
     for att in ticket.attachments.all().order_by("created_at"):
@@ -89,7 +98,7 @@ def _build_media(ticket, hash_id):
             "filename": att.filename,
             "kind": _media_kind(att),
             "content_type": att.content_type or "application/octet-stream",
-            "url": f"/t/file?id={hash_id}&a={att.id}",
+            "url": _file_url(hash_id, att.id),
         })
     return items
 
@@ -139,7 +148,7 @@ def _build_conversation(ticket, hash_id):
         atts = [{
             "filename": att.filename, "kind": _media_kind(att),
             "content_type": att.content_type or "application/octet-stream",
-            "url": f"/t/file?id={hash_id}&a={att.id}",
+            "url": _file_url(hash_id, att.id),
         } for att in m.stored_attachments.all().order_by("created_at")]
         convo.append({
             "sender_name": cust_name if inbound else "DeoDap Support",

@@ -1498,7 +1498,7 @@ def _open_fraud_ticket(brand, *, issue_type, fraudster_mobile):
 
 def _send_existing_fraud_ticket(pending, ticket):
     number = ticket.ticket_number or ticket.ticket_id
-    url = _care_panel_tracking_url(ticket) or (ticket.tracking_url or "")
+    url = customer_ticket_link(ticket) or _care_panel_tracking_url(ticket) or (ticket.tracking_url or "")
     issue = ticket.sub_topic or ticket.issue_summary or "Report Fraud"
     created = ticket.created_at.strftime("%d %b %Y")
     lines = ["You already have open ticket(s) for this issue.", "",
@@ -1582,7 +1582,7 @@ def _fraud_verify(pending, mailbox, message, o, p, e):
 def _fraud_confirmation(ticket):
     """STEP 4 confirmation -- ALWAYS includes the tracking link."""
     number = ticket.ticket_number or ticket.ticket_id
-    url = _care_panel_tracking_url(ticket) or (ticket.tracking_url or "")
+    url = customer_ticket_link(ticket) or _care_panel_tracking_url(ticket) or (ticket.tracking_url or "")
     lines = ["Your complaint is registered.", "", f"Ticket ID: {number}"]
     if url:
         lines += ["", "Track Ticket:", url]
@@ -2334,7 +2334,9 @@ def portal_base_url():
     base = (getattr(settings, "PUBLIC_BASE_URL", "") or "").rstrip("/")
     if not base:
         return ""
-    if _host_of(base) in CARE_PANEL_HOSTS:
+    # Reject ONLY the external Care Panel host (care.deodap.in) -- it can't resolve OUR hashes
+    # (-> 404). Our own app (care.deodap.info/email_automation) is a valid /t portal base.
+    if _host_of(base) == "care.deodap.in":
         logger.error("PUBLIC_BASE_URL %r is the EXTERNAL Care Panel domain, which cannot "
                      "resolve our internal hashes (-> 404). Set it to the public URL of "
                      "THIS Django app (the /t portal host).", base)
@@ -2371,6 +2373,24 @@ def build_tracking_url(ticket=None, *, hash_id=None, ticket_id=""):
     return url
 
 
+def customer_ticket_link(ticket):
+    """The customer-facing ticket link -> OUR /t portal (which shows the full Conversation), so
+    customers land on a page we control. Ensures a resolvable tracking hash. Returns "" only when
+    no portal base is configured (PUBLIC_BASE_URL unset / the external Care Panel), letting the
+    caller fall back to a real Care Panel link."""
+    base = portal_base_url()
+    if not base:
+        return ""
+    extracted = dict(ticket.extracted or {})
+    hash_id = (extracted.get("tracking_hash") or extracted.get("care_panel_ticket_id")
+               or _tracking_hash(ticket))
+    if extracted.get("tracking_hash") != hash_id:
+        extracted["tracking_hash"] = hash_id
+        ticket.extracted = extracted
+        ticket.save(update_fields=["extracted", "updated_at"])
+    return f"{base}/t?id={hash_id}"
+
+
 def _is_bad_internal_link(ticket):
     """True if ticket.tracking_url is a care.deodap.in link carrying OUR internal hash
     instead of a REAL Care Panel hash -- care.deodap.in 404s on it, so it must be cleared
@@ -2390,8 +2410,12 @@ def _tracking_hash(ticket):
 
 
 def _context_tracking_url(ticket):
-    """A tracking URL templates can use: a real existing link, else a public /t link
-    (or "" when no public portal is configured -- never a broken/localhost link)."""
+    """A tracking URL templates can use. Customers now land on OUR /t portal (which shows the
+    full Conversation); fall back to a real Care Panel link only when our portal isn't configured
+    (or PUBLIC_BASE_URL points at the external Care Panel)."""
+    ours = customer_ticket_link(ticket)
+    if ours:
+        return ours
     care_url = _care_panel_tracking_url(ticket)
     if care_url:
         extracted = dict(ticket.extracted or {})

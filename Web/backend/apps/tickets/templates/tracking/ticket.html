@@ -203,7 +203,7 @@
   <div class="card shadow-sm border-0 mb-4">
     <div class="card-body">
       <div class="label mb-2">Add a Reply</div>
-      <form method="post" action="/t?id={{ hash_id }}" enctype="multipart/form-data">
+      <form method="post" action="?id={{ hash_id }}" enctype="multipart/form-data">
         {% csrf_token %}
         <input type="hidden" name="id" value="{{ hash_id }}">
         <textarea name="comment" class="form-control mb-2" rows="3"
