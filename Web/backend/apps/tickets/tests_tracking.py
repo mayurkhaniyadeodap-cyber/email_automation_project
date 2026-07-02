@@ -102,8 +102,8 @@ class ConversationSectionTests(TestCase):
         self.ticket = Ticket.objects.create(
             organization=self.org, brand=self.brand, mailbox=self.mailbox,
             customer_email="buyer@example.com", subject="where is my order",
-            extracted={"tracking_hash": "hash123", "customer_name": "Rahul",
-                       "customer_name_source": "shopify_verified"})
+            extracted={"tracking_hash": "hash123", "name": "Rahul",
+                       "customer_name": "Rahul", "customer_name_source": "shopify_verified"})
 
     def _seed(self):
         from apps.tickets.models import Message, Attachment
