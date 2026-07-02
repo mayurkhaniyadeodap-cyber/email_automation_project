@@ -3930,7 +3930,7 @@ def send_confirmation(ticket, kind):
     if kind == "created" and gc_body:
         gc_subject = (ticket.extracted or {}).get("guided_confirmation_subject") \
             or "Support Ticket Created Successfully"
-        care_url = _care_panel_tracking_url(ticket)
+        care_url = customer_ticket_link(ticket) or _care_panel_tracking_url(ticket)
         body = gc_body + (f"\n\nTrack Ticket:\n{care_url}" if care_url else "")
         logger.info("EMAIL-TEMPLATE-LINK=%s (guided confirmation)",
                     care_url or "(none -- no-link variant)")
@@ -3962,7 +3962,10 @@ def send_confirmation(ticket, kind):
     # Panel hash (https://care.deodap.in/t?id=<hash>); otherwise the no-link variant
     # (M5N/M6N) and log why. We never emit an internal/localhost link here.
     number = ticket.ticket_number or ticket.ticket_id
-    care_url = _care_panel_tracking_url(ticket)
+    # Customer-facing View-Ticket link -> OUR /t portal (which shows the full Conversation and
+    # resolves ANY hash); fall back to the external Care Panel link only if our portal base is
+    # unset. This is why the M5 email now points at care.deodap.info/email_automation/t.
+    care_url = customer_ticket_link(ticket) or _care_panel_tracking_url(ticket)
     logger.info("EMAIL-TEMPLATE-LINK=%s", care_url or "(none -- no-link variant)")
     # A verified two-step inquiry (invoice / franchise / dropship / company) gets its OWN
     # category-specific confirmation wording instead of the generic complaint M5.
