@@ -5,7 +5,7 @@ extractor, storing on the ticket, and the tracking-style confirmation email.
     python manage.py test apps.integrations.tests_care_panel_store
 """
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from apps.integrations import care_panel_store
 from apps.organizations.models import Brand, Mailbox, Organization
@@ -393,6 +393,10 @@ class ReStoreInternalTrackingTests(TestCase):
         self.assertEqual(t.extracted["care_panel_ticket_id"], "AlreadyReal")
 
 
+# Force the EXTERNAL Care Panel as the portal base so these tests exercise the Care Panel
+# View-Ticket link (customer_ticket_link falls back to it when PUBLIC_BASE_URL is care.deodap.in).
+# The OUR-portal link path is covered by tests_mails.ConfirmationTrackingLinkTests.
+@override_settings(PUBLIC_BASE_URL="https://care.deodap.in")
 class TrackingEmailTests(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(name="DeoDap")
