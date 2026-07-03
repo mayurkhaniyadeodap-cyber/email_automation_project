@@ -438,6 +438,7 @@ class WebsiteAppIssueMappingTests(TestCase):
         t = self._ticket("14. Account & Security", "Update Phone / Email")
         self.assertEqual(_detect_issue_type(t)[0], "Update Phone / Email")
 
+    @override_settings(PUBLIC_BASE_URL="https://care.deodap.in")   # exercise the Care Panel link
     def test_cat15_confirmation_email_contains_link_once_hash_exists(self):
         # PROOF: once the Care Panel store returns a hash, the cat-15 confirmation email carries
         # the tracking link.
