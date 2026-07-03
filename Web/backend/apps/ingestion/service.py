@@ -4219,8 +4219,9 @@ def _store_care_panel(ticket):
 
 
 def _upload_care_panel_media(ticket):
-    """Push the ticket's photo/video attachments to its Care Panel tracking page so
-    they appear under 'Media Files'. Needs a matched care_panel_ticket_id. Best-effort."""
+    """Push the ticket's photo/video attachments to its Care Panel tracking page ('Media Files')
+    AND sync the email conversation into the ticket thread. Needs a matched care_panel_ticket_id.
+    Both are best-effort + idempotent (media dedup by sha256, conversation dedup by message id)."""
     try:
         from apps.integrations import care_panel_media
 
@@ -4228,6 +4229,12 @@ def _upload_care_panel_media(ticket):
         care_panel_media.upload_attachments(ticket)
     except Exception:  # noqa: BLE001
         logger.exception("Care Panel media hook failed for %s", ticket.ticket_id)
+    try:
+        from apps.integrations import care_panel_media
+
+        care_panel_media.sync_conversation(ticket)
+    except Exception:  # noqa: BLE001 -- the thread sync must never block the pipeline
+        logger.exception("Care Panel conversation hook failed for %s", ticket.ticket_id)
 
 
 def _auto_decide(ticket):

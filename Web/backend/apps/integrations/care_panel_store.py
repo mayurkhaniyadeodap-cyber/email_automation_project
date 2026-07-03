@@ -489,6 +489,34 @@ def _payload(ticket, include_media=False):
     }
 
 
+def _conversation_payload(ticket):
+    """The customer<->support email thread as [{sender, subject, message, created_at, _id}],
+    oldest first. Built from the Message model (the ONLY place the conversation is stored);
+    quoted history stripped; drafts excluded; empty-body messages dropped.
+
+    NOTE: the external store-json API has NO conversation/messages/chat field (see _payload
+    above -- the schema is source_id/name/phone/email/order_no/awb/courier/issue_id/issue/
+    priority/detail). This payload is consumed by care_panel_media.sync_conversation(), which
+    pushes each message to the ONLY thread-write endpoint the panel exposes: POST /t/add_comment
+    (the customer comment form)."""
+    from apps.ingestion.service import _clean_reply
+    from apps.tickets.models import Message
+
+    out = []
+    for m in ticket.messages.filter(is_draft=False).order_by("created_at"):
+        body = _clean_reply(m.body_text or "").strip()
+        if not body:
+            continue
+        out.append({
+            "_id": m.id,
+            "sender": "Customer" if m.direction == Message.DIRECTION_INBOUND else "Support",
+            "subject": (m.subject or "").strip(),
+            "message": body,
+            "created_at": (m.sent_at or m.created_at).isoformat(),
+        })
+    return out
+
+
 def _store_returned_media_urls(ticket, parsed):
     """Save any media URLs the store response returned onto the ticket's attachments
     (so the local record links to the Care Panel copy). Field-agnostic."""

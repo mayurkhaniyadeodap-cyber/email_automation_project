@@ -261,3 +261,88 @@ def upload_attachments(ticket, comment=None, session=None):
     except Exception:  # noqa: BLE001 -- best-effort
         logger.exception("Care Panel media upload ERROR for %s", ticket.ticket_id)
         return 0
+
+
+def sync_conversation(ticket, session=None):
+    """Push the ticket's email conversation into the Care Panel thread.
+
+    WHY THIS ENDPOINT: the store-json create API has NO conversation/messages/chat field (see
+    care_panel_store._payload), and the panel exposes NO separate agent-reply endpoint. The ONLY
+    thread-write endpoint is POST /t/add_comment (the customer comment form used for media) --
+    which has NO sender field, so every comment renders customer-side. We therefore label the
+    sender INLINE in the comment text.
+
+    The ticket-creating email is already shown in the thread as the store-json `detail`, so the
+    FIRST customer message is skipped (marked synced, not re-posted). Every other message is
+    posted ONCE; already-synced ids are tracked in extracted['cp_synced_messages'] so re-runs
+    (and future replies) never duplicate. Best-effort; never raises. Returns messages posted."""
+    from apps.integrations.care_panel_store import _conversation_payload
+
+    hash_id = (ticket.extracted or {}).get("care_panel_ticket_id")
+    if not hash_id:
+        logger.info("Care Panel conversation SKIP %s: no care_panel_ticket_id (hashId) yet.",
+                    ticket.ticket_id)
+        return 0
+
+    ex = dict(ticket.extracted or {})
+    synced = set(ex.get("cp_synced_messages") or [])
+    convo = _conversation_payload(ticket)
+    # The first customer email == the store-json 'detail' already in the thread -> skip it once.
+    first_customer_id = next((c["_id"] for c in convo if c["sender"] == "Customer"), None)
+    pending = [c for c in convo
+               if c["_id"] not in synced and c["_id"] != first_customer_id]
+    if first_customer_id is not None and first_customer_id not in synced:
+        synced.add(first_customer_id)          # represented by 'detail', never posted
+    if not pending:
+        if synced != set(ex.get("cp_synced_messages") or []):
+            ex["cp_synced_messages"] = sorted(synced)
+            ticket.extracted = ex
+            ticket.save(update_fields=["extracted", "updated_at"])
+        return 0
+
+    if session is None:
+        import requests
+        session = requests.Session()
+
+    posted = 0
+    try:
+        page = session.get(f"{TRACKING_BASE}/t?id={hash_id}", timeout=20)
+        m = _TOKEN_RE.search(page.text or "")
+        if not m:
+            logger.error("Care Panel conversation %s: CSRF _token not found (hashId=%s, status=%s).",
+                         ticket.ticket_id, hash_id, page.status_code)
+            return 0
+        token = m.group(1)
+        for c in pending:
+            label = "🟢 Customer" if c["sender"] == "Customer" else "🔵 DeoDap Support"
+            subj = f"Subject: {c['subject']}\n" if c["subject"] else ""
+            comment = f"[{label}]\n{subj}{c['message']}".strip()
+            try:
+                resp = session.post(
+                    f"{TRACKING_BASE}/t/add_comment",
+                    data={"_token": token, "hashId": hash_id, "comment": comment},
+                    headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
+                    timeout=60)
+            except Exception:  # noqa: BLE001 -- one bad message must not abort the rest
+                logger.exception("Care Panel conversation POST error ticket=%s msg=%s",
+                                 ticket.ticket_id, c["_id"])
+                continue
+            if resp.status_code in (200, 201, 302):
+                synced.add(c["_id"])
+                posted += 1
+            else:
+                logger.error("Care Panel conversation FAILED ticket=%s msg=%s status=%s body=%s",
+                             ticket.ticket_id, c["_id"], resp.status_code, (resp.text or "")[:200])
+    except Exception:  # noqa: BLE001 -- best-effort; never block on the thread sync
+        logger.exception("Care Panel conversation sync ERROR for %s", ticket.ticket_id)
+
+    ex["cp_synced_messages"] = sorted(synced)
+    ticket.extracted = ex
+    ticket.save(update_fields=["extracted", "updated_at"])
+    if posted:
+        logger.info("Care Panel conversation SYNCED ticket=%s messages=%d (hashId=%s)",
+                    ticket.ticket_id, posted, hash_id)
+        AuditLogEntry.objects.create(ticket=ticket, actor="system",
+                                     event="care_panel_conversation_synced",
+                                     detail={"count": posted})
+    return posted
