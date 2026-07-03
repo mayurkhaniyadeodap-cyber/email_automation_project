@@ -277,6 +277,7 @@ def sync_conversation(ticket, session=None):
     posted ONCE; already-synced ids are tracked in extracted['cp_synced_messages'] so re-runs
     (and future replies) never duplicate. Best-effort; never raises. Returns messages posted."""
     from apps.integrations.care_panel_store import _conversation_payload
+    from apps.tickets.models import AuditLogEntry
 
     hash_id = (ticket.extracted or {}).get("care_panel_ticket_id")
     if not hash_id:
