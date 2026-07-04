@@ -584,6 +584,10 @@ def _send_customer_email(to, subject, body, in_reply_to="", references=None, bod
                 in_reply_to=in_reply_to, references=references or [], attachments=attachments,
             )
             logger.info("AUTO-REPLY-DELIVERED to=%s message_id=%s", to, sent_id)
+            # `in_reply_to` is the customer's original Message-ID this auto-reply answers -- log it
+            # so a duplicate send would be visible against the same incoming id (idempotency audit).
+            logger.info("AUTO_REPLY_SENT to=%s in_reply_to=%s reply_message_id=%s",
+                        to, in_reply_to or "-", sent_id or "-")
             return sent_id
         except Exception as exc:  # noqa: BLE001 -- best-effort, but now LOUD + diagnosable
             logger.error("SMTP-SEND-FAILED to=%s subject=%r error=%r -> customer did NOT "
@@ -3496,6 +3500,39 @@ def _derive_subject(message):
     return "No Subject"
 
 
+def _claim_incoming(mailbox, message, gmid):
+    """Atomically claim this incoming Message-ID for processing. Returns True if WE claimed it
+    (proceed to handle), False if it was ALREADY handled -- a re-poll or a concurrent worker.
+
+    The unique `ProcessedEmail.message_id` is the cross-worker lock: only the first INSERT
+    succeeds; any duplicate delivery hits IntegrityError and is skipped safely. This is what
+    makes handling (and therefore the auto-reply) exactly-once even for PENDING REPLIES, which
+    create no Ticket/Message row the older dedup could catch."""
+    from django.db import IntegrityError, transaction
+
+    from apps.tickets.models import ProcessedEmail
+
+    try:
+        with transaction.atomic():
+            ProcessedEmail.objects.create(
+                message_id=gmid, mailbox=mailbox,
+                thread_id=(message.get("thread_id") or "")[:255],
+                from_email=(message.get("from_email") or "")[:255])
+        return True
+    except IntegrityError:
+        return False
+
+
+def _mark_processed_complete(gmid, *, auto_reply_sent=None):
+    """Stamp the claimed ProcessedEmail as fully handled (after successful processing)."""
+    from apps.tickets.models import ProcessedEmail
+
+    fields = {"completed_at": timezone.now()}
+    if auto_reply_sent is not None:
+        fields["auto_reply_sent"] = auto_reply_sent
+    ProcessedEmail.objects.filter(message_id=gmid).update(**fields)
+
+
 def handle_incoming_email(mailbox, message):
     """Single entry point for an inbound email (Smart Ticket Management).
 
@@ -3546,6 +3583,20 @@ def handle_incoming_email(mailbox, message):
         logger.info("REPLY-DECISION message=%s auto_reply=SKIPPED reason=own_support_email "
                     "(our own outbound copy, never a customer reply).", gmid)
         return None, None, False
+
+    # 0b) IDEMPOTENCY GUARD -- claim this Message-ID atomically so the SAME incoming email is
+    # processed (and auto-replied) EXACTLY once, across re-polls AND concurrent workers. This is
+    # the single choke point that also covers PENDING REPLIES, which create no Ticket/Message row
+    # for the older dedup (step 1) to catch. A losing/duplicate claim skips safely -- no auto-reply.
+    if gmid and not _claim_incoming(mailbox, message, gmid):
+        logger.info("DUPLICATE_MESSAGE_DETECTED message_id=%s thread_id=%s from=%s", gmid,
+                    message.get("thread_id") or "-", message.get("from_email") or "-")
+        logger.info("PROCESSING_SKIPPED message_id=%s reason=already_handled_or_concurrent_worker",
+                    gmid)
+        return None, None, False
+    logger.info("PROCESSING_STARTED message_id=%s thread_id=%s from=%s subject=%r", gmid,
+                message.get("thread_id") or "-", message.get("from_email") or "-",
+                (message.get("subject") or "")[:120])
 
     # 1a) INTERNAL RECIPIENT -> the Internal Communications inbox. Checked FIRST (before anything
     # else): an email to/cc/bcc an internal address NEVER enters the support pipeline -- no
@@ -4066,6 +4117,12 @@ def fetch_imap(mailbox, client=None):
                 message.get("from_email") or "-", (message.get("subject") or "")[:120])
             max_uid = max(max_uid, uid)
             continue
+        gmid = message.get("gmail_message_id") or ""
+        logger.info("PROCESSING_COMPLETED message_id=%s thread_id=%s ticket=%s created=%s",
+                    gmid, message.get("thread_id") or "-",
+                    ticket.ticket_id if ticket else "-", created)
+        if gmid:
+            _mark_processed_complete(gmid)
         if ticket is not None:
             logger.info("INBOX-INSERT table=tickets_ticket ticket=%s status=%s -> VISIBLE in "
                         "ticket inbox.", ticket.ticket_id, ticket.status)

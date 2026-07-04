@@ -299,13 +299,17 @@ class FraudInquiryTests(InquiryBase):
         self.assertIn("Payment screenshot (Mandatory)", first)
 
     def test_suspicious_call_skips_menu(self):
-        for body in ("Get Suspicious Call", "Someone called asking OTP", "Fraud Call Received"):
+        # Each iteration is a DISTINCT incoming email -> a unique Message-ID (a real Gmail
+        # Message-ID is globally unique; reusing one would be a duplicate delivery, now skipped
+        # by the incoming-message idempotency guard).
+        for i, body in enumerate(("Get Suspicious Call", "Someone called asking OTP",
+                                  "Fraud Call Received")):
             with self.subTest(body=body):
                 Ticket.objects.all().delete()
                 PendingConversation.objects.all().delete()
                 self.mailbox.imap_last_uid = 0
                 self.mailbox.save(update_fields=["imap_last_uid"])
-                self._run(eml(subject="x", body=body, message_id="<s@x>"))
+                self._run(eml(subject="x", body=body, message_id="<s%d@x>" % i))
                 self.assertNotIn("1. Payment Done to Fraudster", self.sent[0]["body"])
 
     def test_generic_fraud_no_menu_defaults_to_payment(self):

@@ -681,3 +681,29 @@ class ComposedEmail(TimestampedModel):
 
     def __str__(self):
         return f"COMPOSED[{self.status}] {self.to_addrs}"
+
+
+class ProcessedEmail(TimestampedModel):
+    """Idempotency guard for INBOUND email. One row per incoming Gmail/IMAP Message-ID we have
+    started handling, so the SAME email is processed -- and auto-replied -- EXACTLY once, across
+    re-polls AND concurrent background workers.
+
+    The UNIQUE `message_id` is the atomic cross-worker lock: the first worker to INSERT the row
+    wins and proceeds; a concurrent or re-delivered copy hits the unique constraint and skips
+    safely. This closes the gap where a re-fetched / raced PENDING REPLY (which creates no Ticket
+    or Message row) re-sent its auto-reply. `created_at` = when we claimed it; `completed_at` is
+    stamped after successful handling."""
+
+    message_id = models.CharField(max_length=255, unique=True, db_index=True)
+    mailbox = models.ForeignKey(Mailbox, on_delete=models.CASCADE, null=True, blank=True,
+                                related_name="processed_emails")
+    thread_id = models.CharField(max_length=255, blank=True, default="")
+    from_email = models.CharField(max_length=255, blank=True, default="")
+    auto_reply_sent = models.BooleanField(default=False)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"PROCESSED[{self.message_id}]"
