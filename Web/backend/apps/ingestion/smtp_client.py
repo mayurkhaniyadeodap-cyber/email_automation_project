@@ -32,13 +32,17 @@ def _from_header(sender):
 
 
 def send_email(*, to, subject, body_text, from_addr=None, in_reply_to="", references=None,
-               body_html=None, attachments=None, reply_to=None):
+               body_html=None, attachments=None, reply_to=None, cc=None, bcc=None,
+               auto_submitted=True):
     """Send an email via SMTP. Plain-text always; when `body_html` is given the message is
     multipart/alternative so the customer's client renders the HTML (e.g. a 'Track Order'
     hyperlink instead of a raw URL) and falls back to the text part. `attachments` is an
     optional list of (filename, content_bytes, content_type) -- e.g. the company brochure PDF.
     `reply_to` overrides the Reply-To header -- set it to the ONE fetched inbox so customer
     replies always come back to the address we poll, even when From is a 'send as' alias.
+    `cc` / `bcc` are optional recipient strings (comma/space separated); smtplib.send_message
+    delivers to To+Cc+Bcc and strips the Bcc header before transmission. `auto_submitted`=False
+    for a human-composed email (Compose page) so it is NOT flagged as a system auto-reply.
     Returns the Message-ID on success, raises on any SMTP failure."""
     sender = from_addr or settings.IMAP_USER
     refs = " ".join(references or ([in_reply_to] if in_reply_to else []))
@@ -62,14 +66,19 @@ def send_email(*, to, subject, body_text, from_addr=None, in_reply_to="", refere
     msg["Date"] = formatdate(localtime=True)
     msg["From"] = from_header
     msg["To"] = to
+    if (cc or "").strip():
+        msg["Cc"] = cc.strip()
+    if (bcc or "").strip():
+        msg["Bcc"] = bcc.strip()   # send_message delivers to it, then strips the header
     # Reply-To = the fetched inbox (when given) so replies to a 'send as' ALIAS still come back to
     # the ONE inbox we poll; otherwise fall back to the From address.
     msg["Reply-To"] = (reply_to or "").strip() or from_email
     msg["Subject"] = subject
-    # Mark as a system auto-reply so receivers classify it as transactional, not bulk, and
-    # don't auto-reply back (loop prevention).
-    msg["Auto-Submitted"] = "auto-replied"
-    msg["X-Auto-Response-Suppress"] = "All"
+    # Mark a SYSTEM reply as a transactional auto-reply so receivers don't auto-reply back (loop
+    # prevention). A human-composed email (Compose page) sets auto_submitted=False -> no such flag.
+    if auto_submitted:
+        msg["Auto-Submitted"] = "auto-replied"
+        msg["X-Auto-Response-Suppress"] = "All"
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = " ".join(references or [in_reply_to])

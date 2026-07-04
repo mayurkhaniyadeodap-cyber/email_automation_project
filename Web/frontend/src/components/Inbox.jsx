@@ -71,7 +71,8 @@ export default function Inbox() {
           ai_confidence: null, created_at: p.created_at,
         }));
         list = [...held, ...list].sort(
-          (a, b) => new Date(b.created_at) - new Date(a.created_at));
+          (a, b) => new Date(b.last_activity_at || b.created_at)
+                  - new Date(a.last_activity_at || a.created_at));
       }
       setRows(list);
       setCount(list.length);
@@ -119,18 +120,41 @@ export default function Inbox() {
             </TableRow>
           </TableHead>
           <TableBody>
-            {rows.map((t) => (
+            {rows.map((t) => {
+              const unread = !!t.agent_unread;
+              const received = t.last_activity_at || t.created_at;
+              // "You: ..." when we sent the latest message; otherwise just the customer's snippet.
+              const prefix = t.last_from && t.last_from !== (t.customer_email || "")
+                ? `${t.last_from}: ` : "";
+              return (
               <TableRow
-                key={t.id} hover sx={{ cursor: "pointer" }}
+                key={t.id} hover
+                sx={{ cursor: "pointer", ...(unread ? { bgcolor: "#f6faff" } : {}) }}
                 onClick={() => navigate(
                   t._kind === "pending" ? `/pending/${t._pid}` : `/tickets/${t.id}`)}
               >
-                <TableCell>{t.customer_email || "—"}</TableCell>
-                <TableCell>{t.subject || "—"}</TableCell>
+                <TableCell sx={{ fontWeight: unread ? 700 : 400 }}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                    {unread && <Box sx={{ width: 8, height: 8, borderRadius: "50%",
+                                          bgcolor: "#1a73e8", flexShrink: 0 }} />}
+                    {t.customer_email || "—"}
+                  </Box>
+                </TableCell>
+                <TableCell>
+                  <Typography variant="body2" sx={{ fontWeight: unread ? 700 : 400 }}>
+                    {t.subject || "—"}
+                  </Typography>
+                  {t.last_preview && (
+                    <Typography variant="caption" color="text.secondary" noWrap
+                                sx={{ display: "block", maxWidth: 460 }}>
+                      {prefix}{t.last_preview}
+                    </Typography>
+                  )}
+                </TableCell>
                 <TableCell>{t.sub_topic || t.category || "—"}</TableCell>
                 <TableCell><StatusChip status={t.status} label={t.status_display} /></TableCell>
                 <TableCell>{t.ai_confidence != null ? t.ai_confidence.toFixed(2) : "—"}</TableCell>
-                <TableCell>{fmtDate(t.created_at)}</TableCell>
+                <TableCell>{fmtDate(received)}</TableCell>
                 {isIgnoredTab && (
                   <TableCell align="right">
                     <Button size="small" variant="outlined"
@@ -140,7 +164,8 @@ export default function Inbox() {
                   </TableCell>
                 )}
               </TableRow>
-            ))}
+              );
+            })}
             {!loading && rows.length === 0 && (
               <TableRow>
                 <TableCell colSpan={isIgnoredTab ? 7 : 6} align="center" sx={{ py: 5, color: "text.secondary" }}>

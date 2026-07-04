@@ -102,9 +102,9 @@ class UserProfile(TimestampedModel):
 
     # Nav each role may see; viewer is read-only.
     NAV = {
-        ROLE_ADMIN: ["dashboard", "inbox", "tickets", "escalations",
+        ROLE_ADMIN: ["dashboard", "inbox", "tickets", "compose", "escalations",
                      "internal-communications", "settings"],
-        ROLE_AGENT: ["inbox", "tickets"],
+        ROLE_AGENT: ["inbox", "tickets", "compose"],
         ROLE_VIEWER: ["inbox", "tickets"],
     }
     MAX_FAILED_ATTEMPTS = 5

@@ -108,7 +108,8 @@ class LookupTrackingTests(TestCase):
         self.assertEqual(info["awb"], "7X116200902")
         self.assertEqual(info["raw_status"], "Delivered")
         self.assertTrue(info["delivered"])
-        self.assertEqual(info["tracking_url"], "https://ship.deodap.in/t/7X116200902")
+        # Customer link is the DeoDap tracking page (NOT the Care Panel courier trackingUrl).
+        self.assertEqual(info["tracking_url"], "https://ship.deodap.in/tracking/7X116200902")
 
     def test_no_match_anywhere_still_not_found(self):
         # Shopify empty AND Care Panel returns nothing -> genuinely not found (no false data).
@@ -168,12 +169,15 @@ class LookupTrackingTests(TestCase):
         self.assertIn("Track Order:\nhttps://ship.deodap.in/tracking/7D130624612",
                       service._format_tracking_details(info))
 
-    def test_shopify_tracking_url_used_when_available(self):
-        # A real Shopify/courier URL WINS -- we never overwrite it with the ship.deodap link.
-        order = {"shipped": True, "awb": "AWB123", "tracking_url": "https://track/AWB123"}
+    def test_deodap_link_used_not_courier_url(self):
+        # A courier / Shopify tracking URL is NEVER shown to the customer -- the DeoDap tracking
+        # page (built from the AWB) is used instead.
+        order = {"shipped": True, "awb": "AWB123", "tracking_url": "https://www.dtdc.in/track/AWB123"}
         clients = self._clients(shopify=FakeShopify({"486324": order}), shipping=None)
         info = lookup_tracking(self.brand, "486324", clients=clients)
-        self.assertEqual(info["tracking_url"], "https://track/AWB123")
+        self.assertEqual(info["tracking_url"], "https://ship.deodap.in/tracking/AWB123")
+        self.assertEqual(info["tracking_link_source"], "deodap")
+        self.assertNotIn("dtdc.in", service._format_tracking_details(info))
 
     def test_no_link_only_when_courier_orderstatus_and_awb_all_missing(self):
         # A link is omitted ONLY when all three sources are absent.
@@ -195,25 +199,25 @@ class LookupTrackingTests(TestCase):
         self.assertNotIn(">" + url, html)
         self.assertNotIn(url + "<", html)
 
-    # === Track-Order link priority: courier -> order_status_url -> AWB ==================
-    def test_link_priority_courier_url_wins(self):
-        order = {"shipped": True, "awb": "AWB123", "tracking_url": "https://track/AWB123",
+    # === Customer link is ALWAYS the DeoDap page -- courier / order-status URLs never shown =====
+    def test_deodap_link_wins_over_courier_and_order_status(self):
+        # Both a courier tracking URL and a Shopify order-status URL are present, yet the customer
+        # link is the DeoDap tracking page (built from the AWB).
+        order = {"shipped": True, "awb": "AWB123", "tracking_url": "https://www.dtdc.in/track/AWB123",
                  "order_status_url": "https://shop.myshopify.com/orders/abc"}
         info = lookup_tracking(self.brand, "486324",
                                clients=self._clients(shopify=FakeShopify({"486324": order})))
-        self.assertEqual(info["tracking_url"], "https://track/AWB123")
-        self.assertEqual(info["tracking_link_source"], "courier")
+        self.assertEqual(info["tracking_url"], "https://ship.deodap.in/tracking/AWB123")
+        self.assertEqual(info["tracking_link_source"], "deodap")
 
-    def test_link_order_status_url_used_when_no_courier_url(self):
-        # No courier URL but Shopify gave an order_status_url -> it WINS over the AWB build.
+    def test_deodap_link_used_when_awb_present_even_with_order_status(self):
+        # An AWB is present -> the DeoDap link is used (order_status_url is only a no-AWB fallback).
         order = {"shipped": True, "awb": "AWB123", "tracking_url": "",
                  "order_status_url": "https://shop.myshopify.com/orders/abc"}
         info = lookup_tracking(self.brand, "486324",
                                clients=self._clients(shopify=FakeShopify({"486324": order})))
-        self.assertEqual(info["tracking_url"], "https://shop.myshopify.com/orders/abc")
-        self.assertEqual(info["tracking_link_source"], "shopify_order_status_url")
-        self.assertIn("Track Order:\nhttps://shop.myshopify.com/orders/abc",
-                      service._format_tracking_details(info))
+        self.assertEqual(info["tracking_url"], "https://ship.deodap.in/tracking/AWB123")
+        self.assertEqual(info["tracking_link_source"], "deodap")
 
     def test_link_order_status_url_restores_link_when_no_awb(self):
         # The regression: cancelled/unfulfilled order, no AWB, no courier URL, but Shopify
@@ -236,7 +240,7 @@ class LookupTrackingTests(TestCase):
         info = lookup_tracking(self.brand, "486324",
                                clients=self._clients(shopify=FakeShopify({"486324": order})))
         self.assertEqual(info["tracking_url"], "https://ship.deodap.in/tracking/7D130624612")
-        self.assertEqual(info["tracking_link_source"], "awb")
+        self.assertEqual(info["tracking_link_source"], "deodap")
 
     # === RAW STATUS mode: the EXACT API status is shown, never mapped/grouped ==========
     def _status_email(self, *, courier_status=None, fulfillment=None, order_status=None):
@@ -567,7 +571,8 @@ class TrackingFlowTests(TestCase):
         self.assertIn("Status: In Transit", out["body"])
         self.assertIn("Courier: Delhivery", out["body"])
         self.assertIn("AWB: AWB123", out["body"])
-        self.assertIn("Track Order:\nhttps://track/AWB123", out["body"])
+        self.assertIn("Track Order:\nhttps://ship.deodap.in/tracking/AWB123", out["body"])
+        self.assertNotIn("track/AWB123", out["body"])             # courier URL never shown
         self.assertNotIn("looking into", out["body"].lower())     # no acknowledgement
         # IMPORTANT RULES: never a ticket id / Care Panel link / localhost
         self.assertNotIn("TKT-", out["body"])
@@ -805,3 +810,154 @@ class ExplicitIdentifierTrackingTests(TestCase):
         self.assertEqual(Ticket.objects.get().status, Ticket.STATUS_AUTO_RESOLVED)
         self.assertIn("Status: In Transit", self._last()["body"])
         self.assertEqual(PendingConversation.objects.get().status, "closed")  # closed after status
+
+
+class MultiShipmentTrackingTests(TestCase):
+    """An order fulfilled in MULTIPLE packages must check EVERY tracking number, show each
+    shipment, and never report 'Delivered' while any package is still in transit."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="DeoDap")
+        self.brand = Brand.objects.create(organization=self.org, name="DeoDap.in")
+
+    def _clients(self, **kw):
+        return {"shopify": kw.get("shopify"), "shipping": kw.get("shipping"), "gokwik": None}
+
+    # --- data layer: every fulfillment / tracking number is collected -------------------
+    def test_normalize_order_collects_all_fulfillments(self):
+        from apps.integrations.clients import ShopifyClient
+        norm = ShopifyClient.normalize_order({
+            "name": "#262402826", "fulfillment_status": "partial",
+            "fulfillments": [
+                {"tracking_number": "7D132828320", "tracking_company": "DTDC",
+                 "tracking_url": "https://ship.deodap.in/tracking/7D132828320"},
+                {"tracking_number": "7D132828321", "tracking_company": "DTDC",
+                 "tracking_url": "https://ship.deodap.in/tracking/7D132828321"}]})
+        self.assertEqual(len(norm["shipments"]), 2)
+        self.assertEqual([s["awb"] for s in norm["shipments"]], ["7D132828320", "7D132828321"])
+        self.assertEqual(norm["awb"], "7D132828320")     # first = back-compat single field
+
+    def test_normalize_order_expands_multiple_numbers_in_one_fulfillment(self):
+        from apps.integrations.clients import ShopifyClient
+        norm = ShopifyClient.normalize_order({
+            "fulfillments": [{"tracking_numbers": ["A1", "B2"],
+                              "tracking_urls": ["https://t/A1", "https://t/B2"],
+                              "tracking_company": "DTDC"}]})
+        self.assertEqual([s["awb"] for s in norm["shipments"]], ["A1", "B2"])
+
+    def test_single_fulfillment_is_not_multi_shipment(self):
+        order = {"order_id": "486324", "shipped": True, "delivered": True,
+                 "raw_fulfillment_status": "fulfilled", "awb": "AWB1", "courier": "DTDC",
+                 "tracking_url": "https://t/AWB1",
+                 "shipments": [{"awb": "AWB1", "courier": "DTDC", "tracking_url": "https://t/AWB1"}]}
+        info = lookup_tracking(self.brand, "486324", clients=self._clients(
+            shopify=FakeShopify({"486324": order}), shipping=None))
+        self.assertFalse(info["multi_shipment"])         # 1 shipment -> existing behavior
+        self.assertEqual(info["shipments"], [])
+
+    def _multi_order(self):
+        return {"order_id": "262402826", "shipped": True, "delivered": False,
+                "raw_fulfillment_status": "partial", "awb": "7D132828320", "courier": "DTDC",
+                "tracking_url": "https://ship.deodap.in/tracking/7D132828320",
+                "shipments": [
+                    {"awb": "7D132828320", "courier": "DTDC",
+                     "tracking_url": "https://ship.deodap.in/tracking/7D132828320"},
+                    {"awb": "7D132828321", "courier": "DTDC",
+                     "tracking_url": "https://ship.deodap.in/tracking/7D132828321"}]}
+
+    def test_mixed_statuses_are_checked_per_shipment(self):
+        shipping = FakeShipping({
+            "7D132828320": {"raw_status": "Delivered", "delivered": True, "courier": "DTDC",
+                            "tracking_url": "https://ship.deodap.in/tracking/7D132828320"},
+            "7D132828321": {"raw_status": "In Transit", "delivered": False, "courier": "DTDC",
+                            "tracking_url": "https://ship.deodap.in/tracking/7D132828321"}})
+        info = lookup_tracking(self.brand, "262402826", clients=self._clients(
+            shopify=FakeShopify({"262402826": self._multi_order()}), shipping=shipping))
+        self.assertTrue(info["multi_shipment"])
+        self.assertEqual(len(info["shipments"]), 2)
+        self.assertEqual(info["shipments"][0]["raw_status"], "Delivered")
+        self.assertEqual(info["shipments"][1]["raw_status"], "In Transit")
+        self.assertFalse(info["all_delivered"])          # one still in transit
+        self.assertFalse(info["delivered"])              # NOT delivered overall
+
+        details = service._format_tracking_details(info)
+        self.assertIn("Shipment 1", details)
+        self.assertIn("Shipment 2", details)
+        self.assertIn("7D132828321", details)
+        self.assertIn("In Transit", details)
+        self.assertIn("shipped in multiple packages", details)
+        self.assertIn("One package has already been delivered", details)
+        self.assertNotIn("Order Delivered", details)     # never a blanket delivered
+
+    def test_all_delivered(self):
+        shipping = FakeShipping({
+            "7D132828320": {"raw_status": "Delivered", "delivered": True},
+            "7D132828321": {"raw_status": "Delivered", "delivered": True}})
+        info = lookup_tracking(self.brand, "262402826", clients=self._clients(
+            shopify=FakeShopify({"262402826": self._multi_order()}), shipping=shipping))
+        self.assertTrue(info["all_delivered"])
+        self.assertTrue(info["delivered"])
+        details = service._format_tracking_details(info)
+        self.assertIn("All packages have been delivered", details)
+        self.assertNotIn("still on the way", details)
+
+
+class DeodapLinkEnforcementTests(TestCase):
+    """Customers must ONLY ever see DeoDap tracking links -- courier / Shopify tracking URLs are
+    used for live status internally but never appear in a customer email (single or multi)."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="DeoDap")
+        self.brand = Brand.objects.create(organization=self.org, name="DeoDap.in")
+
+    def _clients(self, **kw):
+        return {"shopify": kw.get("shopify"), "shipping": kw.get("shipping"), "gokwik": None}
+
+    def test_single_shipment_uses_deodap_link(self):
+        order = {"order_id": "262275013", "shipped": True, "delivered": False,
+                 "raw_fulfillment_status": "In Transit", "awb": "7D132828320", "courier": "DTDC",
+                 "tracking_url": "https://www.dtdc.in/tracking/7D132828320"}      # courier URL
+        shipping = FakeShipping({"7D132828320": {
+            "raw_status": "In Transit", "status": "in_transit", "delivered": False,
+            "courier": "DTDC", "tracking_url": "https://www.dtdc.in/tracking/7D132828320"}})
+        info = lookup_tracking(self.brand, "262275013", clients=self._clients(
+            shopify=FakeShopify({"262275013": order}), shipping=shipping))
+        self.assertEqual(info["tracking_url"], "https://ship.deodap.in/tracking/7D132828320")
+        body = service._format_tracking_details(info)
+        self.assertIn("https://ship.deodap.in/tracking/7D132828320", body)
+        self.assertNotIn("dtdc.in", body)                    # courier site NEVER shown
+        self.assertIn("Track Order:", body)
+
+    def test_multi_shipment_uses_deodap_links_only(self):
+        order = {"order_id": "262402826", "shipped": True, "delivered": False,
+                 "raw_fulfillment_status": "partial", "awb": "AWB1", "courier": "DTDC",
+                 "tracking_url": "https://www.dtdc.in/track/AWB1",
+                 "shipments": [
+                     {"awb": "AWB1", "courier": "DTDC", "tracking_url": "https://www.dtdc.in/track/AWB1"},
+                     {"awb": "AWB2", "courier": "Blue Dart",
+                      "tracking_url": "https://bluedart.com/track/AWB2"}]}
+        shipping = FakeShipping({
+            "AWB1": {"raw_status": "Delivered", "delivered": True, "courier": "DTDC",
+                     "tracking_url": "https://www.dtdc.in/track/AWB1"},
+            "AWB2": {"raw_status": "In Transit", "delivered": False, "courier": "Blue Dart",
+                     "tracking_url": "https://bluedart.com/track/AWB2"}})
+        info = lookup_tracking(self.brand, "262402826", clients=self._clients(
+            shopify=FakeShopify({"262402826": order}), shipping=shipping))
+        self.assertEqual([s["tracking_url"] for s in info["shipments"]],
+                         ["https://ship.deodap.in/tracking/AWB1",
+                          "https://ship.deodap.in/tracking/AWB2"])
+        body = service._format_tracking_details(info)
+        self.assertNotIn("dtdc.in", body)
+        self.assertNotIn("bluedart", body)
+        self.assertIn("https://ship.deodap.in/tracking/AWB1", body)
+        self.assertIn("https://ship.deodap.in/tracking/AWB2", body)
+        self.assertIn("Track Shipment:", body)
+        self.assertIn("Overall Status: Partially Delivered", body)   # decision rule
+
+    def test_overall_status_decision_rules(self):
+        self.assertEqual(service._overall_shipment_status(
+            [{"delivered": True}, {"delivered": True}]), "Delivered")
+        self.assertEqual(service._overall_shipment_status(
+            [{"delivered": True}, {"delivered": False}]), "Partially Delivered")
+        self.assertEqual(service._overall_shipment_status(
+            [{"delivered": False}, {"delivered": False}]), "In Transit")

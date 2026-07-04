@@ -290,9 +290,10 @@ class OrderIdValidationTests(BaseFixture):
         # Damaged + photo, NO order id, NO phone -> email identifier is enough.
         self._run([
             eml(subject="damaged", body="it broke", message_id="<a@x>"),
-            eml(subject="Re: damaged", body="here is the photo", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True)])
-        self.assertEqual(Ticket.objects.count(), 1)              # created on the photo
+            # Damaged requires BOTH a photo AND a video -> supply both (still NO order id/phone).
+            eml(subject="Re: damaged", body="here is the photo and video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True)])
+        self.assertEqual(Ticket.objects.count(), 1)              # created on the evidence
         t = Ticket.objects.get()
         self.assertNotIn("care.deodap.in", t.tracking_url or "")  # no internal-hash 404 link
         self.assertTrue(t.attachments.filter(content_type__startswith="image/").exists())
@@ -300,8 +301,10 @@ class OrderIdValidationTests(BaseFixture):
     def test_order_id_is_captured_when_provided(self):
         self._run([
             eml(subject="damaged", body="it broke", message_id="<a@x>"),
-            eml(subject="Re: damaged", body="photo, order id DD9999", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True)])
+            # Damaged requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: damaged", body="photo and video, order id DD9999",
+                message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>",
+                image=True, video=True)])
         self.assertEqual(Ticket.objects.count(), 1)
         self.assertEqual(Ticket.objects.get().extracted.get("order_id"), "DD9999")
 
@@ -362,10 +365,12 @@ class VideoMandatoryTests(BaseFixture):
     def test_video_creates_ticket(self):
         self._run([
             eml(subject="defective item", body="broken order DD9999", message_id="<a@x>"),
-            eml(subject="Re: defective", body="video, phone 9876543210", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", video=True),
+            # Defective requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: defective", body="photo and video, phone 9876543210",
+                message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>",
+                image=True, video=True),
         ])
-        self.assertEqual(Ticket.objects.count(), 1)            # video -> created
+        self.assertEqual(Ticket.objects.count(), 1)            # photo + video -> created
         self.assertTrue(Ticket.objects.get().attachments.filter(
             content_type__startswith="video/").exists())
 
@@ -421,10 +426,12 @@ class CategoryVideoGateTests(BaseFixture):
     def test_video_creates_ticket(self):
         self._run([
             eml(subject="Defective Product Received", body="broken DD9999", message_id="<a@x>"),
-            eml(subject="Re: Defective", body="video, phone 9876543210", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", video=True),
+            # Defective requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: Defective", body="photo and video, phone 9876543210",
+                message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>",
+                image=True, video=True),
         ])
-        self.assertEqual(Ticket.objects.count(), 1)            # video -> created
+        self.assertEqual(Ticket.objects.count(), 1)            # photo + video -> created
 
 
 @override_settings(PUBLIC_BASE_URL="https://support.deodap.in")  # portal configured
@@ -471,8 +478,10 @@ class EvidenceAccumulationTests(BaseFixture):
         self._run([
             eml(subject="my product is damage", body="I received a damaged product",
                 message_id="<a@x>"),
-            eml(subject="Re: my product is damage", body="I send video, order id 123456",
-                message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>", video=True)])
+            # Damaged requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: my product is damage", body="I send photo and video, order id 123456",
+                message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>",
+                image=True, video=True)])
         self.assertEqual(Ticket.objects.count(), 1)             # video -> ONE ticket
         self.assertEqual(PendingConversation.objects.count(), 0)
         t = Ticket.objects.get()
@@ -525,9 +534,9 @@ class PhoneNotRequiredTests(BaseFixture):
         from apps.tickets.models import PendingConversation
         self._run([
             eml(subject="damaged", body="it broke order DD9999", message_id="<a@x>"),
-            # photo + order id, NO phone -> ticket is STILL created (not blocked).
-            eml(subject="Re: damaged", body="here is the photo", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True)])
+            # photo + video + order id, NO phone -> ticket is STILL created (not blocked).
+            eml(subject="Re: damaged", body="here is the photo and video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True)])
         self.assertEqual(Ticket.objects.count(), 1)
         self.assertEqual(PendingConversation.objects.count(), 0)
         t = Ticket.objects.get()
@@ -540,8 +549,9 @@ class PhoneNotRequiredTests(BaseFixture):
     def test_confirmation_without_phone_has_no_link(self):
         self._run([
             eml(subject="damaged", body="broke DD9999", message_id="<a@x>"),
-            eml(subject="Re: damaged", body="photo", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True)])
+            # Damaged requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: damaged", body="photo and video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True)])
         t = Ticket.objects.get()
         out = t.messages.filter(direction=Message.DIRECTION_OUTBOUND,
                                 subject="Support Ticket Created Successfully").last()

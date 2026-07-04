@@ -167,12 +167,25 @@ def compute_refund_status(financial_status="", raw_status="", cancelled_at=None)
     return "Not Applicable"          # a normal paid/delivered order -> no refund expected
 
 
+def deodap_tracking_url(awb):
+    """The ONLY customer-facing tracking link: the DeoDap tracking page for a tracking number.
+    Courier / Shopify / Care Panel tracking URLs are used INTERNALLY (for live status) but are
+    NEVER shown to a customer -- every customer email links to https://ship.deodap.in/tracking/<awb>.
+    Returns "" when there is no tracking number (nothing to link yet)."""
+    from django.conf import settings as dj_settings
+
+    awb = (awb or "").strip()
+    if not awb:
+        return ""
+    base = getattr(dj_settings, "SHIPPING_TRACKING_URL_BASE",
+                   "https://ship.deodap.in/tracking/").rstrip("/")
+    return f"{base}/{awb}"
+
+
 def _care_panel_only_tracking(brand, order_id, phone, email, out):
     """Shopify had NO match -> resolve tracking from the Care Panel shipment API alone (seller /
     marketplace orders live there, not in Shopify). Populates `out` with the real shipment status
     / AWB / courier / tracking link when found; otherwise returns `out` unchanged."""
-    from django.conf import settings as dj_settings
-
     from apps.integrations import care_panel
 
     cp = care_panel.fetch_shipment_flow(brand, order_id, phone=phone, email=email)
@@ -190,14 +203,9 @@ def _care_panel_only_tracking(brand, order_id, phone, email, out):
     out["care_panel_called"] = True
     out["panel_status"] = status
     out["raw_status"], out["status_source"] = status, "care_panel_shipment"
-    url = (cp.get("tracking_url") or "").strip()
-    if not url and out["awb"]:
-        base = getattr(dj_settings, "SHIPPING_TRACKING_URL_BASE",
-                       "https://ship.deodap.in/tracking/").rstrip("/")
-        url = f"{base}/{out['awb']}"
-    out["tracking_url"] = url
-    out["tracking_link_source"] = "care_panel" if cp.get("tracking_url") else (
-        "awb" if out["awb"] else "none")
+    # Customer link is ALWAYS the DeoDap tracking page (never the Care Panel courier trackingUrl).
+    out["tracking_url"] = deodap_tracking_url(out["awb"])
+    out["tracking_link_source"] = "deodap" if out["awb"] else "none"
     low = status.lower()
     out["delivered"] = "deliver" in low
     out["shipped"] = out["delivered"] or any(k in low for k in
@@ -210,6 +218,36 @@ def _care_panel_only_tracking(brand, order_id, phone, email, out):
     logger.info("CARE-PANEL-FALLBACK-MATCH order=%s status=%s awb=%s url=%s",
                 order_id or "-", status, out["awb"] or "-", out["tracking_url"] or "-")
     return out
+
+
+def _resolve_shipments(order_shipments, shipping):
+    """Per-shipment LIVE status for a multi-package order. For EVERY tracking number, query the
+    courier (falling back to the public tracking portal), and return a customer-facing row per
+    shipment: {awb, courier, raw_status, tracking_url, delivered}. The tracking_url is ALWAYS the
+    DeoDap page for that AWB -- courier tracking URLs are used for status only, never shown."""
+    rows = []
+    for s in order_shipments:
+        awb = (s.get("awb") or "").strip()
+        courier = (s.get("courier") or "").strip()
+        raw_status, delivered = "", None
+        if shipping and awb:
+            try:
+                t = shipping.track(awb) or {}
+                raw_status = (t.get("raw_status") or t.get("status") or "").strip()
+                courier = t.get("courier") or courier          # courier NAME (not its URL)
+                delivered = t.get("delivered")
+            except Exception:  # noqa: BLE001 -- one bad AWB must not sink the others
+                logger.warning("Multi-shipment: courier lookup failed for awb=%s (skipped).", awb)
+            if not raw_status:
+                portal = scrape_portal_status(awb)
+                if portal:
+                    raw_status = portal
+        if delivered is None:
+            delivered = raw_status.strip().lower() == "delivered"
+        rows.append({"awb": awb, "courier": courier, "raw_status": raw_status,
+                     "tracking_url": deodap_tracking_url(awb),   # customer link = DeoDap page only
+                     "delivered": bool(delivered)})
+    return rows
 
 
 def lookup_tracking(brand, order_id="", awb="", clients=None, phone="", email=""):
@@ -235,7 +273,10 @@ def lookup_tracking(brand, order_id="", awb="", clients=None, phone="", email=""
            "matched_by": "", "matched_identifier": "", "panel_status": "", "customer_name": "",
            "customer_phone": "", "customer_email": "",
            "refund_status": "Not Applicable",
-           "shipped": None, "delivered": None}
+           "shipped": None, "delivered": None,
+           # Multi-package orders: per-shipment live status. Only populated when an order has 2+
+           # tracking numbers; single-shipment orders keep shipments=[] / multi_shipment=False.
+           "shipments": [], "multi_shipment": False, "all_delivered": None}
     if not shopify or not (order_id or phone or email):
         return out
 
@@ -345,30 +386,17 @@ def lookup_tracking(brand, order_id="", awb="", clients=None, phone="", email=""
             logger.info("PORTAL-TRACKING-STATUS %s (ship.deodap.in awb=%s)",
                         portal_status, out["awb"])
 
-    # === TRACK-ORDER LINK -- always provide a link when one can be built (priority): ===
-    #   1 Care Panel courier trackingUrl  2 Shopify fulfillment tracking_url (only when Care
-    #   Panel had NO data)  3 Shopify order-status page (works even for cancelled/refunded)
-    #   4 built-from-AWB. We never emit an internal/localhost link. A cancelled order with no
-    #   courier yet still gets the order-status link (was: no link at all).
-    from django.conf import settings as dj_settings
-
-    cp_url = ((cp or {}).get("tracking_url") or "").strip()
-    shopify_courier_url = (order.get("tracking_url") or "").strip()
+    # === CUSTOMER TRACK LINK -- ONLY the DeoDap tracking page. The courier / Care Panel / Shopify
+    #   tracking URLs are used INTERNALLY for status but are NEVER shown to a customer. Priority:
+    #   1 DeoDap page from the AWB (https://ship.deodap.in/tracking/<awb>)   2 when there is NO
+    #   tracking number yet (not shipped / cancelled), the Shopify ORDER-STATUS page -- which is
+    #   Shopify's own order page, NOT a courier site -- so the customer still has a link.
     order_status_url = (order.get("order_status_url") or "").strip()
     awb = (out.get("awb") or "").strip()
-    if cp_url:
-        out["tracking_url"], out["tracking_link_source"] = cp_url, "care_panel"
-    elif shopify_courier_url and cp is None:
-        # Trust Shopify's own fulfillment tracking only when Care Panel returned nothing.
-        out["tracking_url"], out["tracking_link_source"] = shopify_courier_url, "courier"
+    if awb:
+        out["tracking_url"], out["tracking_link_source"] = deodap_tracking_url(awb), "deodap"
     elif order_status_url:
         out["tracking_url"], out["tracking_link_source"] = order_status_url, "shopify_order_status_url"
-        if cp is not None:
-            logger.info("TRACKING-LINK-CAREPANEL (null) -> order-status fallback.")
-    elif awb:
-        base = getattr(dj_settings, "SHIPPING_TRACKING_URL_BASE",
-                       "https://ship.deodap.in/tracking/").rstrip("/")
-        out["tracking_url"], out["tracking_link_source"] = f"{base}/{awb}", "awb"
     else:
         out["tracking_url"], out["tracking_link_source"] = "", "none"
     logger.info("TRACKING-LINK-FINAL %s (source=%s)",
@@ -425,4 +453,20 @@ def lookup_tracking(brand, order_id="", awb="", clients=None, phone="", email=""
         raw_status=out["raw_status"], cancelled_at=cancelled_at)
     logger.info("ORDER_ID=%s", out["order_id"] or "-")
     logger.info("REFUND_STATUS=%s", out["refund_status"])
+
+    # === MULTIPLE SHIPMENTS: an order fulfilled in several packages has more than one tracking
+    # number. Check the courier status of EVERY tracking number (not just the first) so a package
+    # still in transit is never reported as "Delivered". Only kicks in for 2+ shipments -- a
+    # single-tracking order keeps the exact existing behavior above. ===
+    order_shipments = order.get("shipments") or []
+    if len(order_shipments) >= 2:
+        out["shipments"] = _resolve_shipments(order_shipments, shipping)
+        out["multi_shipment"] = True
+        out["all_delivered"] = bool(out["shipments"]) and all(
+            s.get("delivered") for s in out["shipments"])
+        # Overall delivered ONLY when every package is delivered.
+        out["delivered"] = out["all_delivered"]
+        logger.info("MULTI-SHIPMENT order=%s shipments=%d delivered=%d all_delivered=%s",
+                    out["order_id"], len(out["shipments"]),
+                    sum(1 for s in out["shipments"] if s.get("delivered")), out["all_delivered"])
     return out

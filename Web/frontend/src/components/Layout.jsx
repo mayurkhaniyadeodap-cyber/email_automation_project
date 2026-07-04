@@ -19,6 +19,7 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import DashboardIcon from "@mui/icons-material/DashboardOutlined";
 import InboxIcon from "@mui/icons-material/MailOutlined";
+import ComposeIcon from "@mui/icons-material/EditOutlined";
 import TicketIcon from "@mui/icons-material/ConfirmationNumberOutlined";
 import EscalationIcon from "@mui/icons-material/ReportProblemOutlined";
 import InternalCommsIcon from "@mui/icons-material/ForumOutlined";
@@ -47,6 +48,7 @@ const DRAWER_WIDTH = 220;
 const NAV = [
   ["dashboard", "/dashboard", "Dashboard", <DashboardIcon />],
   ["inbox", "/inbox", "Inbox", <InboxIcon />],
+  ["compose", "/compose", "Compose", <ComposeIcon />],
   ["tickets", "/tickets", "Tickets", <TicketIcon />],
   ["escalations", "/escalations", "Escalation", <EscalationIcon />],
   ["internal-communications", "/internal-communications", "Internal Communications", <InternalCommsIcon />],

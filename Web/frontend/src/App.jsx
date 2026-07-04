@@ -6,6 +6,7 @@ import { ScopeProvider } from "./scope.jsx";
 import Layout from "./components/Layout.jsx";
 import Dashboard from "./components/Dashboard.jsx";
 import Inbox from "./components/Inbox.jsx";
+import Compose from "./components/Compose.jsx";
 import Pending from "./components/Pending.jsx";
 import PendingDetail from "./components/PendingDetail.jsx";
 import Escalations from "./components/Escalations.jsx";
@@ -40,6 +41,7 @@ export default function App() {
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/inbox" element={<Inbox />} />
+          <Route path="/compose" element={<Compose />} />
           <Route path="/pending" element={<Pending />} />
           <Route path="/pending/:id" element={<PendingDetail />} />
           <Route path="/escalations" element={<Escalations />} />

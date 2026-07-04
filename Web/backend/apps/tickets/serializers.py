@@ -89,6 +89,27 @@ class TicketListSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerializer)
     order_id = serializers.SerializerMethodField()
     phone = serializers.SerializerMethodField()
     evidence_requests = serializers.SerializerMethodField()
+    # Gmail-style Inbox row: the latest message's sender + a short preview, and unread state.
+    last_from = serializers.SerializerMethodField()
+    last_preview = serializers.SerializerMethodField()
+
+    def _latest_message(self, obj):
+        # obj.messages is prefetched by the viewset -> no extra query per row.
+        msgs = [m for m in obj.messages.all() if not m.is_draft]
+        return max(msgs, key=lambda m: m.created_at) if msgs else None
+
+    def get_last_from(self, obj):
+        m = self._latest_message(obj)
+        if m is None:
+            return obj.customer_email or ""
+        # For an outbound (agent) message show "You"; for inbound show the customer's address.
+        return "You" if m.direction == "outbound" else (m.from_email or obj.customer_email or "")
+
+    def get_last_preview(self, obj):
+        m = self._latest_message(obj)
+        text = ((m.body_text if m else "") or obj.subject or "").strip()
+        text = " ".join(text.split())              # collapse whitespace/newlines
+        return text[:140]
 
     def get_order_id(self, obj):
         return (obj.extracted or {}).get("order_id") or ""
@@ -105,12 +126,13 @@ class TicketListSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerializer)
     class Meta:
         model = Ticket
         fields = [
-            "id", "ticket_id", "brand", "mailbox", "customer_name", "customer_email",
-            "customer_phone", "sender_name", "sender_email", "subject",
+            "id", "ticket_id", "ticket_number", "brand", "mailbox", "customer_name",
+            "customer_email", "customer_phone", "sender_name", "sender_email", "subject",
             "category", "sub_topic", "status", "status_display", "priority",
             "priority_display", "ai_confidence", "ai_handled", "is_ignored",
             "ignored_reason", "order_id", "phone", "evidence_requests",
             "sla_due_at", "created_at", "updated_at",
+            "last_activity_at", "agent_unread", "last_from", "last_preview",
         ]
 
 
@@ -159,7 +181,7 @@ class TicketDetailSerializer(_OwnerSenderFieldsMixin, serializers.ModelSerialize
     class Meta:
         model = Ticket
         fields = [
-            "id", "ticket_id", "organization", "brand", "mailbox", "thread_id",
+            "id", "ticket_id", "ticket_number", "organization", "brand", "mailbox", "thread_id",
             "customer_name", "customer_email", "customer_phone", "sender_name",
             "sender_email", "subject", "category", "sub_topic", "category_ref",
             "sub_topic_ref", "action_taken", "status", "status_display", "priority",
@@ -207,5 +229,32 @@ class InternalEmailSerializer(serializers.ModelSerializer):
             "status", "status_display", "priority", "message_id", "received_at", "created_at",
             "is_read", "assigned_to", "assigned_at", "draft", "conversation", "timeline",
             "attachments", "brand",
+        ]
+        read_only_fields = fields
+
+
+from .models import ComposedEmail  # noqa: E402
+
+
+class ComposedEmailSerializer(serializers.ModelSerializer):
+    """Read view for a Compose-page email (draft or sent), with its downloadable attachments."""
+
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    attachments = serializers.SerializerMethodField()
+
+    def get_attachments(self, obj):
+        return [{
+            "id": a.id, "filename": a.filename,
+            "content_type": a.content_type or "",
+            "size": a.size, "url": f"/api/attachments/{a.id}/",
+        } for a in obj.attachments.all().order_by("created_at")]
+
+    class Meta:
+        model = ComposedEmail
+        fields = [
+            "id", "brand", "from_email", "to_addrs", "cc", "bcc", "subject",
+            "body_html", "body_text", "status", "status_display", "message_id",
+            "error", "created_by", "sent_at", "created_at", "updated_at", "attachments",
+            "conversation", "is_read", "ticket",
         ]
         read_only_fields = fields

@@ -186,15 +186,28 @@ class DamagedPhotoFlowTests(_Flow):
         self.assertEqual(p.status, "awaiting_evidence")         # NOT waiting_for_video
 
     def test_photo_is_sufficient_creates_ticket(self):
+        # NEW rule: Damaged requires BOTH a photo AND a video. A photo-only reply is no
+        # longer enough -- it stays pending (waiting_for_video); the follow-up video reply
+        # then supplies the second mandatory file and the ticket is created.
         prov = self._provider("3. Delivery Issues", "3.3 Damaged Item", "damaged product")
         self._run(prov, [
             eml(subject="Damaged item", body="broken", message_id="<a@x>"),
             eml(subject="Re: Damaged", body="photo, order #12345", message_id="<a2@x>",
                 in_reply_to="<a@x>", references="<a@x>", image=True),
         ])
-        self.assertEqual(Ticket.objects.count(), 1)             # PHOTO is enough for damaged
+        self.assertEqual(Ticket.objects.count(), 0)             # photo alone is NOT enough now
+        self.assertEqual(PendingConversation.objects.get().status, "waiting_for_video")
+        # Follow-up video reply -> both mandatory files present -> ticket created.
+        self.mailbox.imap_last_uid = 0                          # let the follow-up UID through
+        self.mailbox.save(update_fields=["imap_last_uid"])
+        self._run(prov, [
+            eml(subject="Re: Damaged", body="here is the video", message_id="<a3@x>",
+                in_reply_to="<a@x>", references="<a@x>", video=True),
+        ])
+        self.assertEqual(Ticket.objects.count(), 1)             # photo + video -> ticket
         t = Ticket.objects.get()
         self.assertTrue(t.attachments.filter(content_type__startswith="image/").exists())
+        self.assertTrue(t.attachments.filter(content_type__startswith="video/").exists())
 
 
 class NoEvidenceFlowTests(_Flow):
@@ -338,8 +351,9 @@ class NoOrderIdRequestTests(_Flow):
         prov = self._provider("3. Delivery Issues", "3.3 Damaged", "damaged product")
         self._run(prov, [
             eml(subject="damaged", body="broke, no order number at all", message_id="<a@x>"),
-            eml(subject="Re: damaged", body="here is the photo", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True)])
+            # Damaged requires BOTH a photo AND a video -> supply both so the ticket is created.
+            eml(subject="Re: damaged", body="here is the photo and video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True)])
         # Ticket created on the photo, with NO order id anywhere.
         self.assertEqual(Ticket.objects.count(), 1)
         # No outbound message may ask for an Order ID.
@@ -392,10 +406,12 @@ class EvidenceNoDoubleEmailTests(_Flow):
         self.assertEqual(self._outbound().count(self.SEED_ASK), 0)
 
     def test_photo_reply_creates_ticket_no_evidence_email(self):
-        self._reply_creates_ticket_no_second_ask(image=True)
+        # Damaged now requires BOTH a photo AND a video before a ticket -> supply both.
+        self._reply_creates_ticket_no_second_ask(image=True, video=True)
 
     def test_video_reply_creates_ticket_no_evidence_email(self):
-        self._reply_creates_ticket_no_second_ask(video=True)
+        # Damaged now requires BOTH a photo AND a video before a ticket -> supply both.
+        self._reply_creates_ticket_no_second_ask(image=True, video=True)
 
     def test_photo_and_video_reply_creates_ticket_no_evidence_email(self):
         self._reply_creates_ticket_no_second_ask(image=True, video=True)

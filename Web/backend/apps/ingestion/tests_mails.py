@@ -12,6 +12,11 @@ from apps.ingestion import mails
 class MailRegistryTests(TestCase):
     def test_every_mail_has_all_languages(self):
         for mail_id, variants in mails.MAILS.items():
+            # EV_* delivered-item evidence templates are intentionally English-only: they are
+            # always rendered with a forced English variant per the spec wording, so they carry
+            # no Hindi/Gujarati variants and are exempt from the all-languages requirement.
+            if mail_id.startswith("EV_"):
+                continue
             for lang in mails.SUPPORTED_LANGS:
                 self.assertIn(lang, variants, f"{mail_id} missing {lang}")
                 subject, body = variants[lang]

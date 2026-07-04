@@ -36,6 +36,7 @@ from apps.taxonomy.views import (
 )
 from apps.tickets.views import (
     AuditLogEntryViewSet,
+    ComposedEmailViewSet,
     EscalationViewSet,
     InternalEmailViewSet,
     MessageViewSet,
@@ -62,6 +63,7 @@ router.register("users", UserViewSet, basename="user")
 router.register("pending", PendingConversationViewSet, basename="pending")
 router.register("escalations", EscalationViewSet, basename="escalation")
 router.register("internal-emails", InternalEmailViewSet, basename="internalemail")
+router.register("compose-emails", ComposedEmailViewSet, basename="composedemail")
 
 
 def _get_profile(user):

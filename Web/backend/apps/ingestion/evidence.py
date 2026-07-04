@@ -34,10 +34,12 @@ VIDEO_KEYWORDS = (
     "items missing", "not received", "didn't receive", "did not receive",
     "wrong item", "wrong product", "incorrect item", "received wrong", "wrong size",
 )
-# Photo-evidence intents: damage/quality you can see in a still image.
+# Photo-evidence intents: damage/quality you can see in a still image. Also "wrong parcel"
+# (a whole-parcel mix-up) -> photo evidence (POS + product images + shipping label), no video.
 PHOTO_KEYWORDS = (
     "damaged", "damage", "broken", "bad quality", "poor quality", "quality issue",
     "cracked", "torn", "leaking", "scratch", "dented", "spoiled",
+    "wrong parcel", "wrong package", "wrong shipment",
 )
 
 # Cancellation intents -- these take PRIORITY over damage/evidence keywords (a customer
@@ -131,6 +133,69 @@ def delivered_item_subtype(text):
         if any(k in low for k in keywords):
             return subtype
     return None
+
+# --------------------------------------------------------------------------------------- #
+# Delivered-Item evidence REQUIREMENTS (customer-facing rules for the "Delivered Item
+# Related" category). This is EVIDENCE-ONLY: it decides which stored files are mandatory
+# before a ticket and which auto-reply requests them. It is deliberately SEPARATE from
+# delivered_item_subtype() (which drives the Care Panel issue mapping) so category
+# classification and the Care Panel integration are left untouched. need_photo / need_video
+# are validated against the EXISTING has_photo / has_video detection.
+# --------------------------------------------------------------------------------------- #
+EV_CASE_DAMAGED = "damaged"
+EV_CASE_NON_WORKING = "non_working"
+EV_CASE_MISSING = "missing"
+EV_CASE_WRONG_PRODUCT = "wrong_product"
+EV_CASE_WRONG_PARCEL = "wrong_parcel"
+EV_CASE_DEFECTIVE = "defective"
+
+# ORDER MATTERS -- most specific first. Non-working is kept distinct from Defective, and Wrong
+# Parcel (the whole parcel is someone else's) distinct from Wrong Product (one wrong item).
+_DELIVERED_EVIDENCE_CASES = (
+    (EV_CASE_WRONG_PARCEL, ("wrong parcel", "wrong package", "wrong shipment", "entire parcel",
+                            "whole parcel", "different parcel", "not my order", "not my parcel",
+                            "someone else", "another person")),
+    (EV_CASE_NON_WORKING, ("not working", "doesn't work", "does not work", "won't work",
+                           "stopped working", "won't turn on", "not turning on", "won't switch on",
+                           "not switching on", "won't power on", "not powering on",
+                           "dead on arrival", "won't charge", "not charging")),
+    (EV_CASE_DEFECTIVE, ("defective", "defect", "faulty", "malfunction", "malfunctioning")),
+    (EV_CASE_DAMAGED, ("damaged", "damage", "broken", "crack", "cracked", "torn", "leak",
+                       "leakage", "leaking", "dented", "shattered", "scratched")),
+    (EV_CASE_WRONG_PRODUCT, ("wrong item", "wrong product", "different product", "different item",
+                             "incorrect item", "incorrect product", "received wrong",
+                             "wrong article")),
+    (EV_CASE_MISSING, ("missing", "item not received", "product not received", "not received",
+                       "didn't receive", "did not receive")),
+)
+
+# Per case: mandatory FILE evidence (checked via has_photo / has_video) + the mail template id.
+# SKU / product count are requested in the mail text but are free-text the customer types in the
+# same reply -- they are not separately file-gated (there is no reliable attachment for them).
+DELIVERED_EVIDENCE_RULES = {
+    EV_CASE_DAMAGED:       {"photo": True,  "video": True,  "mail": "EV_DAMAGED"},
+    EV_CASE_NON_WORKING:   {"photo": False, "video": True,  "mail": "EV_NON_WORKING"},
+    EV_CASE_MISSING:       {"photo": True,  "video": True,  "mail": "EV_MISSING"},
+    EV_CASE_WRONG_PRODUCT: {"photo": True,  "video": True,  "mail": "EV_WRONG_PRODUCT"},
+    EV_CASE_WRONG_PARCEL:  {"photo": True,  "video": False, "mail": "EV_WRONG_PARCEL"},
+    EV_CASE_DEFECTIVE:     {"photo": True,  "video": True,  "mail": "EV_DEFECTIVE"},
+}
+
+
+def delivered_evidence_case(text):
+    """Return the Delivered-Item evidence CASE (one of EV_CASE_*) for `text`, or None.
+
+    Evidence-only: it selects the exact evidence-request wording + the mandatory files. Deferred
+    to is_delivered_not_received (a whole parcel never arrived -> no unboxing evidence possible).
+    Does NOT change classification or the Care Panel issue mapping."""
+    if is_delivered_not_received(text):
+        return None
+    low = (text or "").lower()
+    for case, keywords in _DELIVERED_EVIDENCE_CASES:
+        if any(k in low for k in keywords):
+            return case
+    return None
+
 
 # File-type detection for evidence already attached. Used to scan stored attachments /
 # message parts so we NEVER re-ask for evidence the customer already sent.

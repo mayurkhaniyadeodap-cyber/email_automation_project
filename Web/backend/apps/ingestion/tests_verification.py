@@ -234,12 +234,14 @@ class UniversalEvidenceWorkflowTests(VerificationFlowTests):
         self._run(
             eml(subject="my order is damaged",
                 body=f"the item is damaged. my mobile is {self.MATCH_PHONE}", message_id="<a@x>"),
-            eml(subject="Re: my order is damaged", body="here is the photo", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True),
+            # Damaged requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: my order is damaged", body="here is the photo and video",
+                message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>",
+                image=True, video=True),
             clients=self._clients(match=True),
             classify=self._classify_ev("3. Delivery Issues (Post-Delivery)", "item is damaged",
                                        self.cat3))
-        # first email: verified -> asked for proof, NO ticket; reply photo -> ticket.
+        # first email: verified -> asked for proof, NO ticket; reply with proof -> ticket.
         self.assertEqual(Ticket.objects.count(), 1)
         self.assertEqual(PendingConversation.objects.count(), 0)
 
@@ -247,8 +249,10 @@ class UniversalEvidenceWorkflowTests(VerificationFlowTests):
         self._run(
             eml(subject="my order is damaged",
                 body=f"damaged item. mobile {self.MATCH_PHONE}", message_id="<a@x>"),
-            eml(subject="Re: my order is damaged", body="video attached", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", video=True),
+            # Damaged requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: my order is damaged", body="photo and video attached",
+                message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>",
+                image=True, video=True),
             clients=self._clients(match=True),
             classify=self._classify_ev("3. Delivery Issues (Post-Delivery)", "item is damaged",
                                        self.cat3))
@@ -273,8 +277,9 @@ class UniversalEvidenceWorkflowTests(VerificationFlowTests):
         self._run(
             eml(subject="missing item", body=f"item missing from order. mobile {self.MATCH_PHONE}",
                 message_id="<a@x>"),
-            eml(subject="Re: missing item", body="unboxing video", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", video=True),
+            # Missing requires BOTH a photo (POS paper) AND a video -> supply both.
+            eml(subject="Re: missing item", body="photo and unboxing video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True),
             clients=self._clients(match=True),
             classify=self._classify_ev("3. Delivery Issues (Post-Delivery)",
                                        "missing item not received", self.cat3))
@@ -284,8 +289,9 @@ class UniversalEvidenceWorkflowTests(VerificationFlowTests):
         self._run(
             eml(subject="wrong item", body=f"wrong item delivered. mobile {self.MATCH_PHONE}",
                 message_id="<a@x>"),
-            eml(subject="Re: wrong item", body="video", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", video=True),
+            # Wrong item requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: wrong item", body="photo and video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True),
             clients=self._clients(match=True),
             classify=self._classify_ev("3. Delivery Issues (Post-Delivery)",
                                        "wrong item delivered", self.cat3))
@@ -318,8 +324,10 @@ class UniversalEvidenceWorkflowTests(VerificationFlowTests):
 
     # --- No-loop guards ---------------------------------------------------------------
     def test_no_duplicate_ticket_after_evidence(self):
-        reply = eml(subject="Re: my order is damaged", body="photo", message_id="<a2@x>",
-                    in_reply_to="<a@x>", references="<a@x>", image=True)
+        # Damaged requires BOTH a photo AND a video -> supply both on the (repeated) reply.
+        reply = eml(subject="Re: my order is damaged", body="photo and video",
+                    message_id="<a2@x>", in_reply_to="<a@x>", references="<a@x>",
+                    image=True, video=True)
         self._run(
             eml(subject="my order is damaged",
                 body=f"damaged. mobile {self.MATCH_PHONE}", message_id="<a@x>"),
@@ -350,15 +358,18 @@ class UniversalEvidenceWorkflowTests(VerificationFlowTests):
         self._run(
             eml(subject="my order is damaged",
                 body=f"damaged. mobile {self.MATCH_PHONE}", message_id="<a@x>"),
-            eml(subject="Re: my order is damaged", body="photo", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True),
+            # Damaged requires BOTH a photo AND a video -> supply both on the reply.
+            eml(subject="Re: my order is damaged", body="photo and video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True),
             eml(subject="Re: my order is damaged", body="any update?", message_id="<a3@x>",
                 in_reply_to="<a@x>", references="<a@x>"),
             clients=self._clients(match=True),
             classify=self._classify_ev("3. Delivery Issues (Post-Delivery)", "item is damaged",
                                        self.cat3))
-        photo_asks = [s for s in self.sent if "photo" in s["body"].lower()]
-        self.assertEqual(len(photo_asks), 1)               # asked for proof exactly ONCE
+        # The EV_DAMAGED evidence request ("...register your complaint...") is sent exactly
+        # ONCE (the first ask); once the proof arrives it is never re-requested.
+        proof_asks = [s for s in self.sent if "register your complaint" in s["body"].lower()]
+        self.assertEqual(len(proof_asks), 1)               # asked for proof exactly ONCE
         self.assertEqual(Ticket.objects.count(), 1)
 
     # --- Parity: a phone that verifies for Tracking verifies for Evidence -------------
@@ -517,16 +528,15 @@ class VerifiedCustomerNameTests(VerificationFlowTests):
             requires_agent=False, category_ref=self.cat3, sub_topic_ref=None)
 
     def _damaged_flow(self, summary="item is damaged", shopify_name="Raneesh Kanhirakadan"):
-        # Wrong / Missing require a VIDEO; Damaged accepts a photo. Send whichever satisfies
-        # the sub-type so the pending always promotes to a ticket.
-        needs_video = any(w in summary for w in ("wrong", "missing"))
+        # Damaged / Wrong / Missing now ALL require BOTH a photo AND a video before the pending
+        # promotes to a ticket -- attach both so the flow always produces a ticket.
         self._run(
             eml(subject="my order issue",
                 body=f"problem. my mobile is {self.MATCH_PHONE}", message_id="<a@x>",
                 from_addr=self.SENDER),
             eml(subject="Re: my order issue", body="here is proof", message_id="<a2@x>",
                 in_reply_to="<a@x>", references="<a@x>",
-                image=not needs_video, video=needs_video, from_addr=self.SENDER),
+                image=True, video=True, from_addr=self.SENDER),
             clients=self._clients(name=shopify_name),
             classify=self._classify_ev(summary))
         return Ticket.objects.get()
@@ -905,14 +915,16 @@ class VerificationFirstTicketTests(VerificationFlowTests):
                   classify=self._classify("3. Delivery Issues (Post-Delivery)", self.cat3,
                                           "item is damaged", requires_evidence=True))
         self.assertEqual(Ticket.objects.count(), 0)               # verified, but no proof yet
-        self.assertIn("photo", self._last()["body"].lower())      # asked for the proof
+        # Damaged now asks via the EV_DAMAGED template (unboxing video + clear images).
+        self.assertIn("video", self._last()["body"].lower())      # asked for the proof
 
     # 4) Verified + screenshot/proof -> ticket created.
     def test_verified_with_proof_creates_ticket(self):
         self._run(
             eml(subject="damaged", body=f"item damaged. mobile {self.PHONE}", message_id="<a@x>"),
-            eml(subject="Re: damaged", body="here is the photo", message_id="<a2@x>",
-                in_reply_to="<a@x>", references="<a@x>", image=True),
+            # Damaged requires BOTH a photo AND a video -> supply both.
+            eml(subject="Re: damaged", body="here is the photo and video", message_id="<a2@x>",
+                in_reply_to="<a@x>", references="<a@x>", image=True, video=True),
             clients=self._shop(),
             classify=self._classify("3. Delivery Issues (Post-Delivery)", self.cat3,
                                     "item is damaged", requires_evidence=True))

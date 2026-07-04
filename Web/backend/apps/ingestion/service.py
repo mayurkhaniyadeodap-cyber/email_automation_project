@@ -303,6 +303,25 @@ def _validate_phone(pending, message):
     return _extract_phone(text) or pending.phone or ""
 
 
+# AWB / courier tracking number: an explicitly labelled "AWB: <ref>" value, else a standalone
+# alphanumeric token that mixes letters AND digits (e.g. 7D132828320). A PURE-numeric value is
+# intentionally NOT captured here -- it is read as the order id and separately re-checked against
+# the courier -- so a bare number never masquerades as a verified AWB.
+_AWB_LABEL_RE = re.compile(
+    r"(?:awb|way\s*bill|tracking(?:\s*(?:no\.?|number|id))?)\s*[:#\-]?\s*([A-Za-z0-9]{6,20})",
+    re.IGNORECASE)
+_AWB_TOKEN_RE = re.compile(r"\b(?=[A-Za-z0-9]{8,20}\b)(?=\w*[A-Za-z])(?=\w*\d)[A-Za-z0-9]+\b")
+
+
+def _extract_awb(text):
+    """Return a courier AWB / tracking number found in `text`, or "" (see note above)."""
+    m = _AWB_LABEL_RE.search(text or "")
+    if m:
+        return m.group(1)
+    m = _AWB_TOKEN_RE.search(text or "")
+    return m.group(0) if m else ""
+
+
 def _has_identifier(pending):
     """A ticket can be created once we have ANY ONE customer identifier -- email,
     phone, OR order id. Phone is NOT mandatory (new rule): the Care Panel store may
@@ -437,6 +456,69 @@ def _message_has_video(message):
         if evidence.is_video(part.get("filename") or "", part.get("mime_type") or ""):
             return True
     return False
+
+
+def _message_has_photo(message):
+    """True if the email carries a PHOTO/image attachment (video-only returns False)."""
+    for part in (message.get("attachment_blobs") or []) + (message.get("attachments") or []):
+        if evidence.is_photo(part.get("filename") or "", part.get("mime_type") or ""):
+            return True
+    return False
+
+
+# ---- Delivered-Item evidence cases (per-case request wording + validation) --------------
+def _result_delivered_case(result, message):
+    """The Delivered-Item evidence case for a fresh classification (or None)."""
+    blob = " ".join(filter(None, [
+        result.sub_topic or "", result.issue_summary or "",
+        message.get("subject") or "", message.get("body_text") or ""]))
+    return evidence.delivered_evidence_case(blob)
+
+
+def _pending_delivered_case(pending):
+    """The Delivered-Item evidence case for a held conversation (or None)."""
+    blob = " ".join(filter(None, [
+        pending.sub_topic or "", pending.issue_summary or "",
+        pending.subject or "", pending.body_text or ""]))
+    return evidence.delivered_evidence_case(blob)
+
+
+def _message_meets_case(message, case):
+    """True when THIS email already carries every file the case makes mandatory."""
+    rule = evidence.DELIVERED_EVIDENCE_RULES[case]
+    return ((not rule["photo"] or _message_has_photo(message))
+            and (not rule["video"] or _message_has_video(message)))
+
+
+def _pending_meets_case(pending, case):
+    """True when the held conversation has accumulated every file the case makes mandatory."""
+    rule = evidence.DELIVERED_EVIDENCE_RULES[case]
+    return ((not rule["photo"] or pending.has_photo)
+            and (not rule["video"] or pending.has_video))
+
+
+def _send_delivered_evidence_request(mailbox, message, pending, case):
+    """Send the Delivered-Item evidence request with the EXACT per-case wording and hold the
+    conversation. Reuses the M2/M2P send mechanics (threading, evidence_requests counter); only
+    the template + the waiting status differ. English wording per spec, regardless of language."""
+    rule = evidence.DELIVERED_EVIDENCE_RULES[case]
+    subject_tpl, body = mails.render(rule["mail"], "en")
+    subject = f"Re: {pending.subject}" if pending.subject else subject_tpl
+    refs = list(pending.references or [])
+    if pending.original_message_id and pending.original_message_id not in refs:
+        refs.append(pending.original_message_id)
+    sent_id = _send_customer_email(
+        pending.customer_email, subject, body,
+        in_reply_to=pending.original_message_id, references=refs)
+    pending.evidence_requests = (pending.evidence_requests or 0) + 1
+    # A video-mandatory case waits in 'waiting_for_video'; a photo-only case in 'awaiting_evidence'
+    # (same states the generic M2 / M2P flow uses, so reminders / auto-close behave identically).
+    pending.status = "waiting_for_video" if rule["video"] else "awaiting_evidence"
+    if sent_id:
+        pending.last_message_id = sent_id
+    pending.save(update_fields=["evidence_requests", "status", "last_message_id", "updated_at"])
+    logger.info("DELIVERED-EVIDENCE-REQUEST pending=%s case=%s need_photo=%s need_video=%s "
+                "status=%s", pending.id, case, rule["photo"], rule["video"], pending.status)
 
 
 def _result_requires_video(result):
@@ -759,9 +841,11 @@ def _is_cancellation(message, result):
     return evidence.is_cancellation(text)
 
 
-def _send_cancel_lookup(mailbox, message, pending):
-    """M_CANCEL_LOOKUP: ask the customer for the order reference to cancel (no evidence)."""
-    subject, body = mails.render("M_CANCEL_LOOKUP", pending.language)
+def _send_cancel_lookup(mailbox, message, pending, template="M_CANCEL_LOOKUP"):
+    """Ask the customer for an order reference to cancel (M_CANCEL_LOOKUP), or -- when the
+    identifier they sent could NOT be verified -- the 'not found, resend a valid one' message
+    (M_CANCEL_NOT_FOUND). No evidence, NO ticket; the pending stays open for the next reply."""
+    subject, body = mails.render(template, pending.language)
     subj = f"Re: {pending.subject}" if pending.subject else subject
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
@@ -774,8 +858,9 @@ def _send_cancel_lookup(mailbox, message, pending):
     if sent_id:
         pending.last_message_id = sent_id
     pending.save(update_fields=["evidence_requests", "last_message_id", "updated_at"])
-    logger.info("CANCEL-LOOKUP sent to %s (order=%s)", pending.customer_email,
-                pending.order_id or "(none)")
+    logger.info("CANCEL-%s sent to %s (order=%s)",
+                "NOT-FOUND" if template == "M_CANCEL_NOT_FOUND" else "LOOKUP",
+                pending.customer_email, pending.order_id or "(none)")
 
 
 def _handle_cancellation(mailbox, message, result):
@@ -793,21 +878,44 @@ def _handle_cancellation(mailbox, message, result):
     extracted["intent"] = "ORDER_CANCELLATION"
     result.extracted = extracted
     result.requires_evidence = False
-    logger.info("CANCELLATION from=%s order=%s awb=%s phone=%s", message.get("from_email"),
-                extracted.get("order_id"), extracted.get("awb"), extracted.get("phone"))
+    order_id = extracted.get("order_id") or ""
+    phone = extracted.get("phone") or ""
+    _o, _p, email = _tracking_identifiers(
+        message, exclude_emails=[mailbox.email_address, message.get("from_email")])
+    awb_candidate = _extract_awb(text) or order_id or extracted.get("awb") or ""
+    logger.info("CANCELLATION from=%s order=%s awb=%s phone=%s email=%s", message.get("from_email"),
+                order_id or "-", awb_candidate or "-", phone or "-", email or "-")
 
-    if extracted.get("order_id") or extracted.get("awb"):
-        ticket, msg, created = ingest_message(mailbox, message)
-        if created and getattr(ticket, "_created_now", True):
-            _finalize_new_ticket(ticket, result)
-        return ticket, msg, created
+    def _hold_and_ask(template="M_CANCEL_LOOKUP"):
+        pending = _create_pending(mailbox, message, result)
+        pending.requires_evidence = False
+        pending.extracted = {**(pending.extracted or {}), "intent": "ORDER_CANCELLATION"}
+        pending.save(update_fields=["requires_evidence", "extracted", "updated_at"])
+        _send_cancel_lookup(mailbox, message, pending, template=template)
+        return None, None, True
 
-    pending = _create_pending(mailbox, message, result)
-    pending.requires_evidence = False
-    pending.extracted = {**(pending.extracted or {}), "intent": "ORDER_CANCELLATION"}
-    pending.save(update_fields=["requires_evidence", "extracted", "updated_at"])
-    _send_cancel_lookup(mailbox, message, pending)
-    return None, None, True
+    # Cancellation identifiers are Order Number / AWB / Registered Email (NOT phone: a phone alone
+    # doesn't say WHICH order to cancel, so we still ask for one). Phone is recorded, never used
+    # to auto-create.
+    if order_id or email or awb_candidate:
+        # VERIFY the identifier BEFORE creating a ticket (same rule as the reply path).
+        proceed, status, info, verified_awb = _verify_cancellation_identifier(
+            mailbox.brand, order_id=order_id, email=email, awb=awb_candidate)
+        if proceed:
+            result.extracted = _stamp_verified_customer({**extracted}, info)
+            if verified_awb and not result.extracted.get("awb"):
+                result.extracted["awb"] = verified_awb
+            ticket, msg, created = ingest_message(mailbox, message)
+            if created and getattr(ticket, "_created_now", True):
+                _finalize_new_ticket(ticket, result)
+            return ticket, msg, created
+        # Provided an identifier that did NOT verify -> hold, ask for a valid one. NO ticket.
+        logger.warning("TICKET_CREATION_SKIPPED_INVALID_ORDER from=%s (first email) -- identifier "
+                       "not verified; NO ticket, NO Care Panel, NO confirmation.",
+                       message.get("from_email"))
+        return _hold_and_ask(template="M_CANCEL_NOT_FOUND")
+
+    return _hold_and_ask()      # nothing provided -> ask for an order reference
 
 
 def _is_shipment_tracking(obj):
@@ -843,10 +951,71 @@ def _is_rto_status(info):
     return _tracking_status_text(info) == "Return To Origin (RTO)"
 
 
+def _overall_shipment_status(shipments):
+    """Overall status for a multi-package order (decision rules):
+      all delivered            -> Delivered
+      some delivered, some not  -> Partially Delivered
+      none delivered (all moving) -> In Transit"""
+    total = len(shipments)
+    delivered = sum(1 for s in shipments if s.get("delivered"))
+    if total and delivered == total:
+        return "Delivered"
+    if delivered >= 1:
+        return "Partially Delivered"
+    return "In Transit"
+
+
+def _format_multi_shipment_details(info):
+    """Status block for an order shipped in MULTIPLE packages: an overall status (per the decision
+    rules) + EVERY shipment (Tracking / Courier / Status / DeoDap Track link). Every link is the
+    DeoDap tracking page -- courier URLs are NEVER shown. If any package is still on the way we
+    never report a blanket 'Order Delivered'."""
+    shipments = info.get("shipments") or []
+    lines = []
+    if info.get("order_id"):
+        lines.append(f"Order ID: {info['order_id']}")
+    lines += [f"Overall Status: {_overall_shipment_status(shipments)}", ""]
+    for i, s in enumerate(shipments, 1):
+        status = _map_tracking_status(s.get("raw_status")) or "Update"
+        lines.append(f"Shipment {i}")
+        lines.append(f"Tracking: {s.get('awb') or '-'}")
+        if s.get("courier"):
+            lines.append(f"Courier: {s['courier']}")
+        lines.append(f"Status: {status}")
+        if s.get("tracking_url"):
+            lines += ["Track Shipment:", s["tracking_url"]]
+        lines.append("")
+    delivered = sum(1 for s in shipments if s.get("delivered"))
+    total = len(shipments)
+    if delivered < total:
+        # At least one package is still on the way -> never say "Order Delivered".
+        lines.append("Your order has been shipped in multiple packages.")
+        lines.append("")
+        if delivered == 0:
+            lines.append("All packages are still on the way.")
+        else:
+            remaining = total - delivered
+            lines.append("One package has already been delivered." if delivered == 1
+                         else f"{delivered} packages have already been delivered.")
+            lines.append("The remaining package is still on the way." if remaining == 1
+                         else "The remaining packages are still on the way.")
+        lines.append("")
+        lines.append("Please use the tracking links above to track each shipment.")
+    else:
+        lines.append("All packages have been delivered.")
+    return "\n".join(lines).strip()
+
+
 def _format_tracking_details(info):
     """Build the customer status block: Order ID / Status / (RTO note) / Courier / AWB / Refund /
     live courier URL. The tracking URL is the REAL Shopify/courier link -- never care.deodap.in
-    and never build_tracking_url(). Status uses the mapped courier status (see above)."""
+    and never build_tracking_url(). Status uses the mapped courier status (see above).
+
+    A multi-package order (2+ tracking numbers) renders every shipment separately (see
+    _format_multi_shipment_details) so a still-in-transit package is never hidden behind the
+    first one's 'Delivered'."""
+    if info.get("multi_shipment") and info.get("shipments"):
+        return _format_multi_shipment_details(info)
     lines = []
     if info.get("order_id"):
         lines.append(f"Order ID: {info['order_id']}")
@@ -970,9 +1139,11 @@ def _send_tracking_status(brand, *, to, language, order_id="", phone="", email="
                 info.get("order_id") or "-", info.get("awb") or "-",
                 info.get("tracking_url") or "-")
     send_subject = f"Re: {subject}" if subject else subj
-    # HTML version: render the tracking link as a "View Order Status" hyperlink so the
-    # customer never sees the raw URL (BUG 2). Plain text remains the fallback.
-    body_html = _email_html(body, info.get("tracking_url") or "")
+    # HTML version: render the tracking link as a "View Order Status" hyperlink so the customer
+    # never sees the raw URL (BUG 2). A multi-package order keeps EACH per-shipment link (they're
+    # linkified individually), so we don't collapse them into one "View Order Status".
+    html_url = "" if info.get("multi_shipment") else (info.get("tracking_url") or "")
+    body_html = _email_html(body, html_url)
     info["sent_id"] = _send_customer_email(to, send_subject, body, body_html=body_html,
                                            in_reply_to=in_reply_to, references=references or [])
     return info
@@ -989,6 +1160,11 @@ def _email_html(plain_body, tracking_url=""):
         esc_url = _html.escape(tracking_url, quote=True)
         link = f'<a href="{esc_url}">View Order Status</a>'
         esc = esc.replace(_html.escape(tracking_url), link)
+    # Linkify any remaining raw http(s) URLs (e.g. the per-shipment tracking links in a
+    # multi-package order) so each one is clickable. URLs already wrapped in an <a> above are
+    # preceded by a double-quote and skipped by the lookbehind.
+    esc = re.sub(r'(?<!")(https?://[^\s<]+)',
+                 lambda m: f'<a href="{m.group(1)}">{m.group(1)}</a>', esc)
     return "<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#222\">" \
            + esc.replace("\n", "<br>") + "</div>"
 
@@ -1875,6 +2051,31 @@ def _verify_against_shopify(brand, order_id, phone, email):
     behind a broken integration. False only on an explicit NO-MATCH / no identifier."""
     status, info = _shopify_verify(brand, order_id, phone, email, workflow="evidence")
     return status in ("verified", "cannot_verify"), status, info
+
+
+def _verify_cancellation_identifier(brand, *, order_id="", phone="", email="", awb=""):
+    """Verify a cancellation identifier BEFORE any ticket is created (fixes: a bare number was
+    stored as order_id and a ticket created without checking Shopify). Reuses the SHARED Shopify
+    verifier for order / phone / email; a value that is not a Shopify order is then checked as a
+    courier AWB (shipping.verify_awb, which reuses shipping.track). Returns
+    (proceed, status, info, verified_awb). proceed is True on a real match OR when Shopify is down
+    (cannot_verify -> never trap the customer); False only on a genuine not_found / no identifier."""
+    logger.info("ORDER_VERIFICATION_STARTED order=%s phone=%s email=%s awb=%s",
+                order_id or "-", phone or "-", email or "-", awb or "-")
+    proceed, status, info = _verify_against_shopify(brand, order_id, phone, email)
+    verified_awb = ""
+    if not proceed and awb:
+        from apps.integrations import shipping as _shipping
+        if _shipping.verify_awb(brand, awb):
+            proceed, status, verified_awb = True, "verified", awb
+    if proceed:
+        logger.info("ORDER_VERIFIED status=%s order=%s awb=%s customer=%s", status,
+                    (info or {}).get("order_id") or order_id or "-", verified_awb or awb or "-",
+                    (info or {}).get("customer_name") or "-")
+    else:
+        logger.info("ORDER_NOT_FOUND status=%s order=%s phone=%s email=%s awb=%s", status,
+                    order_id or "-", phone or "-", email or "-", awb or "-")
+    return proceed, status, info, verified_awb
 
 
 def _clear_awaiting_verification(pending):
@@ -2989,6 +3190,125 @@ def _append_internal_reply(internal_email, message, gmid):
                 internal_email.id, message.get("from_email") or "-")
 
 
+def send_composed_email(*, to, subject, body_text, body_html=None, from_email=None,
+                        cc=None, bcc=None, attachments=None, mailbox=None,
+                        in_reply_to="", references=None):
+    """Send a NEW or REPLY human-composed email (Compose page) through the EXISTING SMTP sender
+    (smtp_client.send_email) -- no ticket, no automation. The From is a validated brand
+    SupportEmail alias (resolve_sender_email); Cc/Bcc and file attachments are supported. For a
+    reply within a Compose thread, pass `in_reply_to` (the last Message-ID) and `references` (all
+    thread Message-IDs) so the customer's client threads it (Gmail RFC threading). Returns the new
+    Message-ID on success, None on failure (logged)."""
+    from django.conf import settings
+
+    if not (to or "").strip():
+        logger.error("COMPOSE-SEND-FAILED reason=no_recipient subject=%r", subject)
+        return None
+    provider = getattr(settings, "EMAIL_PROVIDER", "imap")
+    if provider != "imap":
+        logger.warning("COMPOSE-SEND-SKIPPED provider=%s (not 'imap') -> no SMTP send.", provider)
+        return None
+    # Honor the chosen alias only if it's an active SupportEmail for the brand; else fall back.
+    from_addr = resolve_sender_email(mailbox, from_email) if mailbox is not None \
+        else ((from_email or "").strip().lower() or reply_from_address())
+    try:
+        from .smtp_client import send_email
+
+        sent_id = send_email(
+            to=to, subject=subject, body_text=body_text, body_html=body_html,
+            from_addr=from_addr, cc=cc, bcc=bcc, attachments=attachments,
+            in_reply_to=in_reply_to or "", references=references or None,
+            auto_submitted=False,          # a real, human-composed email, not a system auto-reply
+        )
+        logger.info("COMPOSE-SEND-SUCCESS to=%s from=%s message_id=%s in_reply_to=%s",
+                    to, from_addr, sent_id, in_reply_to or "-")
+        return sent_id
+    except Exception as exc:  # noqa: BLE001 -- surfaced to the agent via the API response
+        logger.error("COMPOSE-SEND-FAILED to=%s from=%s subject=%r error=%r",
+                     to, from_addr, subject, exc)
+        return None
+
+
+def _match_composed_thread(brand, message):
+    """Return (composed_email, already_appended) when an incoming email is a reply to a Compose
+    thread, else (None, False). A reply is matched by RFC headers ONLY (In-Reply-To / References
+    against ComposedEmail.thread_refs) -- never by subject. `already_appended` is True when THIS
+    message was already folded into the thread (a re-fetch) so the caller must not duplicate it."""
+    from apps.tickets.models import ComposedEmail
+
+    own_ids = [i for i in (
+        (message.get("message_id") or "").strip(),
+        (message.get("gmail_message_id") or "").strip(),
+    ) if i]
+    # Dedup: this exact message already recorded on some thread -> no-op re-fetch.
+    for tok in own_ids:
+        ce = ComposedEmail.objects.filter(brand=brand, thread_refs__contains=tok).first()
+        if ce is not None:
+            return ce, True
+    # Match by the reply's In-Reply-To / References ids.
+    for ref in _reply_refs(message):
+        ce = ComposedEmail.objects.filter(brand=brand, thread_refs__contains=ref).first()
+        if ce is not None:
+            return ce, False
+    return None, False
+
+
+def _save_composed_attachments(composed, message):
+    """Persist an incoming reply's file attachments against the Compose thread and return their
+    [{filename, url, content_type}] for the conversation entry (downloadable, like every other
+    stored attachment)."""
+    from django.core.files.base import ContentFile
+
+    from apps.tickets.models import Attachment
+
+    out = []
+    for blob in (message.get("attachment_blobs") or message.get("attachments") or []):
+        content = blob.get("content")
+        filename = blob.get("filename") or blob.get("name") or "attachment"
+        ct = blob.get("mime_type") or blob.get("content_type") or ""
+        if content:
+            att = Attachment(composed_email=composed, filename=filename, content_type=ct,
+                             size=len(content))
+            att.file.save(filename, ContentFile(content), save=False)
+            att.save()
+            out.append({"filename": filename, "content_type": ct,
+                        "url": f"/api/attachments/{att.id}/"})
+        elif blob.get("url"):
+            out.append({"filename": filename, "content_type": ct, "url": blob["url"]})
+    return out
+
+
+def _append_composed_reply(composed, message, gmid):
+    """A customer reply threaded into a Compose email -> append it to the SAME conversation.
+    NO ticket, NO escalation, NO new conversation (exactly the Gmail behaviour). Stores reply
+    attachments, records the inbound message, registers its Message-ID for further replies, and
+    marks the thread unread."""
+    body_text = (message.get("body_text") or "").strip()
+    body_html = (message.get("body_html") or "").strip()
+    atts = _save_composed_attachments(composed, message)
+    composed.add_message({
+        "direction": "inbound",
+        "from": (message.get("from_email") or "").strip(),
+        "to": (message.get("to") or "").strip(),
+        "subject": (message.get("subject") or "").strip(),
+        "body_html": body_html,
+        "body_text": body_text,
+        "message_id": (message.get("message_id") or gmid or "").strip(),
+        "in_reply_to": (message.get("in_reply_to") or "").strip(),
+        "at": timezone.now().isoformat(),
+        "attachments": atts,
+    })
+    # Also register the Gmail/IMAP dedup id so a re-fetch is recognised even if Message-ID is blank.
+    if gmid and gmid not in (composed.thread_refs or ""):
+        composed.thread_refs = f"{composed.thread_refs} {gmid}".strip()
+    composed.is_read = False
+    if composed.status == composed.STATUS_DRAFT:
+        composed.status = composed.STATUS_SENT   # a reply implies the thread is live
+    composed.save(update_fields=["conversation", "thread_refs", "is_read", "status", "updated_at"])
+    logger.info("COMPOSE-REPLY-APPENDED composed=%s from=%s message=%s (no ticket, no escalation)",
+                composed.id, message.get("from_email") or "-", gmid)
+
+
 def send_internal_reply(internal_email, body, *, agent="agent", subject=None, to=None,
                         email_attachments=None, stored_attachments=None, forward=False,
                         from_email=None):
@@ -3248,6 +3568,20 @@ def handle_incoming_email(mailbox, message):
                     message.get("from_email") or "-")
         return ticket, msg, created
 
+    # 1b-ii) COMPOSE-THREAD REPLY -> the customer replied to an email an agent sent from the
+    # Compose page. Matched by RFC headers (In-Reply-To / References) against the Compose thread's
+    # Message-IDs. Fold it into that SAME conversation and STOP -- never an escalation, never a new
+    # ticket / conversation (Gmail behaviour). Checked BEFORE pending/escalation so a compose reply
+    # can never be hijacked by the keyword/sender escalation rules.
+    composed, already = _match_composed_thread(brand, message)
+    if composed is not None:
+        if not already:
+            _append_composed_reply(composed, message, gmid)
+        logger.info("REPLY-DECISION message=%s matched=compose_thread composed=%s auto_reply=SKIPPED "
+                    "reason=%s -> appended to conversation (no ticket, no escalation).",
+                    gmid, composed.id, "duplicate_refetch" if already else "compose_reply")
+        return None, None, (not already)
+
     # Routing priority for a reply: existing ticket / pending conversation ALWAYS win over the
     # High-Priority escalation engine. A reply that belongs to an ACTIVE pending (fraud /
     # verification / evidence / inquiry) naturally contains trigger words ("fraud", "fraudster",
@@ -3311,14 +3645,69 @@ def handle_incoming_email(mailbox, message):
         if (pending.extracted or {}).get("intent") == "INQUIRY":
             return _handle_inquiry_reply(mailbox, message, pending)
 
-        # Cancellation conversation: never ask for evidence; need an ORDER reference
-        # (order id / AWB) to identify which order to cancel -> create once we have it.
+        # Cancellation conversation: every reply is PARSED AFRESH. We extract the newest Order
+        # Number / mobile / AWB / Registered Email from THIS reply and verify THAT -- never the
+        # previously-stored (possibly invalid) value. Verified -> ticket + clear pending; not
+        # verified -> keep the pending and ask again. No cached failures, no duplicate pending.
         if (pending.extracted or {}).get("intent") == "ORDER_CANCELLATION":
-            if not (pending.order_id or (pending.extracted or {}).get("awb")):
+            from apps.classifier.rule_classifier import _extract_order_id, _extract_phone
+
+            reply_text = f"{message.get('subject', '')} {message.get('body_text', '')}"
+            new_order = _extract_order_id(reply_text) or ""
+            new_phone = _extract_phone(reply_text) or ""
+            _o, _p, new_email = _tracking_identifiers(
+                message, exclude_emails=[mailbox.email_address, pending.customer_email])
+            new_awb = _extract_awb(reply_text) or ""
+            prev_identifier = (pending.order_id or pending.phone
+                               or (pending.extracted or {}).get("awb") or "-")
+            new_identifier = new_order or new_phone or new_email or new_awb
+            logger.info("PREVIOUS_IDENTIFIER=%s", prev_identifier)
+            logger.info("NEW_IDENTIFIER=%s", new_identifier or "-")
+
+            if not new_identifier:
+                # The reply carried NO identifier -> ask again; NEVER re-verify the old value.
+                logger.info("PENDING_CONTINUES pending=%s reason=no_identifier_in_reply", pending.id)
                 _send_cancel_lookup(mailbox, message, pending)
                 return None, None, True
-            ticket = _promote_pending(mailbox, pending, message)
-            return ticket, ticket.messages.order_by("created_at").last(), True
+
+            # REPLACE the stored identifier with the newest value -- clears any stale order/AWB so
+            # a fresh mobile/email/order is never dragged down by a previous invalid order number.
+            ex = {**(pending.extracted or {})}
+            ex["order_id"] = new_order
+            ex.pop("awb", None)
+            if new_awb:
+                ex["awb"] = new_awb
+            pending.order_id = new_order
+            if new_phone:
+                pending.phone = new_phone
+            pending.extracted = ex
+            pending.save(update_fields=["order_id", "phone", "extracted", "updated_at"])
+            logger.info("IDENTIFIER_UPDATED prev=%s new=%s", prev_identifier, new_identifier)
+
+            # AWB candidate: a labelled/alphanumeric AWB, else the bare number (order OR AWB).
+            awb_candidate = new_awb or new_order or ""
+            logger.info("VERIFYING_IDENTIFIER order=%s phone=%s email=%s awb=%s", new_order or "-",
+                        new_phone or "-", new_email or "-", awb_candidate or "-")
+            proceed, status, info, verified_awb = _verify_cancellation_identifier(
+                brand, order_id=new_order, phone=new_phone, email=new_email, awb=awb_candidate)
+            logger.info("VERIFICATION_RESULT status=%s proceed=%s", status, proceed)
+
+            if proceed:
+                ex = _stamp_verified_customer({**(pending.extracted or {})}, info)
+                if verified_awb and not ex.get("awb"):
+                    ex["awb"] = verified_awb
+                pending.extracted = ex
+                pending.save(update_fields=["extracted", "updated_at"])
+                ticket = _promote_pending(mailbox, pending, message)   # creates ticket + clears pending
+                logger.info("TICKET_CREATED ticket=%s identifier=%s (cancellation verified).",
+                            ticket.ticket_id, ex.get("order_id") or verified_awb or new_identifier)
+                return ticket, ticket.messages.order_by("created_at").last(), True
+
+            logger.warning("TICKET_CREATION_SKIPPED_INVALID_ORDER pending=%s -- identifier not "
+                           "verified; NO ticket, NO Care Panel, NO confirmation email.", pending.id)
+            logger.info("PENDING_CONTINUES pending=%s status=%s", pending.id, status)
+            _send_cancel_lookup(mailbox, message, pending, template="M_CANCEL_NOT_FOUND")
+            return None, None, True
 
         # Evidence-category verification gate (STEP 4 / STEP 7) on a reply. VERIFY-SOFT: if
         # proof has now arrived, accept it (clear the flag, fall through to the evidence
@@ -3382,12 +3771,22 @@ def handle_incoming_email(mailbox, message):
                     pending.has_photo, bool(pending.order_id), bool(pending.phone),
                     bool(pending.customer_email), _has_identifier(pending))
 
+        # Delivered-Item evidence gate: each sub-case has its OWN mandatory files + wording
+        # (Damaged = video+photo, Non-working = video, Missing = video+POS photo, Wrong Product
+        # = video+photo(+SKU text), Wrong Parcel = photos only, Defective = photo+video). This
+        # applies ONLY to the six delivered-item cases; every other category keeps the generic
+        # photo/video gate below unchanged.
+        delivered_case = _pending_delivered_case(pending) if level != evidence.EV_NONE else None
+        if delivered_case is not None:
+            if not _pending_meets_case(pending, delivered_case):
+                _send_delivered_evidence_request(mailbox, message, pending, delivered_case)
+                return None, None, True
         # Category-first evidence gate: VIDEO-mandatory needs a video (photo-only is not
         # enough); PHOTO categories accept a photo (or video); NONE needs no media.
-        if level == evidence.EV_VIDEO and not pending.has_video:
+        elif level == evidence.EV_VIDEO and not pending.has_video:
             _send_video_request(mailbox, message, pending)         # no/ photo-only -> need video
             return None, None, True
-        if level == evidence.EV_PHOTO and not pending.has_evidence:
+        elif level == evidence.EV_PHOTO and not pending.has_evidence:
             _send_photo_request(mailbox, message, pending)         # need a photo (video optional)
             return None, None, True
         if level != evidence.EV_NONE and pending.has_evidence:
@@ -3534,7 +3933,24 @@ def handle_incoming_email(mailbox, message):
     #   NONE   -> Tracking / Refund / Return / General: no media; fall through to 5.
     if result is not None and result.is_support_request:
         level = _result_evidence_level(result)
-        if level == evidence.EV_VIDEO and not _message_has_video(message):
+        # Delivered-Item cases carry their own mandatory-evidence rules + exact wording; when the
+        # first email is missing any mandatory file, hold it and send the case-specific request.
+        delivered_case = _result_delivered_case(result, message) if level != evidence.EV_NONE else None
+        if delivered_case is not None:
+            if not _message_meets_case(message, delivered_case):
+                rule = evidence.DELIVERED_EVIDENCE_RULES[delivered_case]
+                status = "waiting_for_video" if rule["video"] else "awaiting_evidence"
+                logger.info("EVIDENCE-GATE new-email from=%s delivered_case=%s need_photo=%s "
+                            "need_video=%s decision=%s", message.get("from_email"), delivered_case,
+                            rule["photo"], rule["video"], status)
+                pending = _create_pending(mailbox, message, result, status=status)
+                # Record any PARTIAL evidence already on this first email (e.g. a photo when both
+                # photo+video are required) so we never re-ask for what the customer already sent.
+                _accumulate_pending(pending, message)
+                _send_delivered_evidence_request(mailbox, message, pending, delivered_case)
+                return None, None, True
+            # First email already has all mandatory files -> fall through to create the ticket.
+        elif level == evidence.EV_VIDEO and not _message_has_video(message):
             total, images, videos = _attachment_counts(message)
             logger.info("EVIDENCE-GATE new-email from=%s level=video attachments=%d "
                         "images=%d videos=%d category=%s decision=waiting_for_video",
@@ -3542,7 +3958,7 @@ def handle_incoming_email(mailbox, message):
             pending = _create_pending(mailbox, message, result, status="waiting_for_video")
             _send_video_request(mailbox, message, pending)
             return None, None, True
-        if level == evidence.EV_PHOTO and not _message_has_evidence(message):
+        elif level == evidence.EV_PHOTO and not _message_has_evidence(message):
             logger.info("EVIDENCE-GATE new-email from=%s level=photo category=%s "
                         "decision=awaiting_evidence", message.get("from_email"), result.category)
             pending = _create_pending(mailbox, message, result)

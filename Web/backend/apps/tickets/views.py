@@ -57,8 +57,18 @@ class TicketViewSet(OrgScopedViewSet):
     )
     org_lookup = "organization"
     brand_lookup = "brand"
-    search_fields = ["ticket_id", "subject", "customer_email"]
-    ordering_fields = ["created_at", "updated_at", "priority", "sla_due_at"]
+    # Search covers the Care Panel ticket number (the user-facing number) + the internal
+    # ticket_id (kept for internal lookups) + the two identity values in the extracted JSON
+    # (verified customer name + order number), so the listing search matches by ticket no. /
+    # name / order no. / email / subject.
+    search_fields = ["ticket_number", "ticket_id", "subject", "customer_email",
+                     "extracted__customer_name", "extracted__order_id"]
+    ordering_fields = ["created_at", "updated_at", "priority", "sla_due_at",
+                       "ticket_id", "status", "last_activity_at"]
+    # Default order (when no ?ordering= is sent, e.g. the Inbox): latest message activity first,
+    # so a conversation with a fresh customer reply jumps to the top -- exactly like Gmail. The
+    # Tickets page passes an explicit ?ordering= and overrides this.
+    ordering = ["-last_activity_at", "-created_at"]
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -90,7 +100,23 @@ class TicketViewSet(OrgScopedViewSet):
             qs = qs.filter(is_ignored=True)
         elif ignored != "all":
             qs = qs.filter(is_ignored=False)
+        # Date range (?range=today|yesterday|7d|30d, or explicit ?since=&until=) -- the same
+        # helper the Escalations queue uses. Additive: off unless a range param is passed, so
+        # the default listing is unchanged.
+        since, until = _range_window(params)
+        if since:
+            qs = qs.filter(created_at__date__gte=since)
+        if until:
+            qs = qs.filter(created_at__date__lte=until)
         return qs
+
+    def retrieve(self, request, *args, **kwargs):
+        """Opening a conversation clears its unread flag (Gmail behaviour)."""
+        ticket = self.get_object()
+        if ticket.agent_unread:
+            ticket.agent_unread = False
+            ticket.save(update_fields=["agent_unread", "updated_at"])
+        return Response(self.get_serializer(ticket).data)
 
     @action(detail=True, methods=["post"])
     def reply(self, request, pk=None):
@@ -420,12 +446,13 @@ def attachment_file(request, pk):
                         status=http_status.HTTP_401_UNAUTHORIZED)
 
     att = Attachment.objects.select_related(
-        "ticket", "escalation", "internal_email").filter(pk=pk).first()
+        "ticket", "escalation", "internal_email", "composed_email").filter(pk=pk).first()
     if att is None:
         return Response(status=http_status.HTTP_404_NOT_FOUND)
     org_id = (att.ticket and att.ticket.organization_id) or (
         att.escalation and att.escalation.organization_id) or (
-        att.internal_email and att.internal_email.organization_id)
+        att.internal_email and att.internal_email.organization_id) or (
+        att.composed_email and att.composed_email.organization_id)
     if not user.is_superuser and not (org_id and user.organizations.filter(pk=org_id).exists()):
         return Response({"detail": "Forbidden."}, status=http_status.HTTP_403_FORBIDDEN)
 
@@ -855,3 +882,232 @@ class InternalEmailViewSet(OrgScopedViewSet):
         ie.save(update_fields=["status", "timeline", "updated_at"])
         logger.info("INTERNAL-EMAIL-DELETED internal=%s by=%s", ie.id, self._actor())
         return Response(self.get_serializer(ie).data)
+
+
+from .models import ComposedEmail  # noqa: E402
+from .serializers import ComposedEmailSerializer  # noqa: E402
+
+
+class ComposedEmailViewSet(OrgScopedViewSet):
+    """Compose page: create standalone outbound emails (Gmail-like) and send them via the SAME
+    SMTP sender the rest of the app uses. NEVER creates or updates a ticket / escalation / pending.
+    Actions: `draft` (save without sending) and `send`. Drafts are listable, reloadable and
+    deletable; sent/failed records are the outbound history."""
+
+    queryset = ComposedEmail.objects.prefetch_related("attachments").all()
+    serializer_class = ComposedEmailSerializer
+    org_lookup = "organization"
+    brand_lookup = "brand"
+    search_fields = ["to_addrs", "cc", "bcc", "subject", "from_email", "body_text"]
+    ordering_fields = ["created_at", "sent_at", "status"]
+    http_method_names = ["get", "post", "delete", "head", "options"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.request.query_params.get("status"):
+            qs = qs.filter(status=self.request.query_params["status"])
+        return qs
+
+    def _actor(self):
+        u = self.request.user
+        return getattr(u, "email", "") or getattr(u, "username", "") or "agent"
+
+    def _brand(self, request):
+        """The brand to file this email under -- from the form/body, scoped to the user's orgs."""
+        from apps.organizations.models import Brand
+        bid = request.data.get("brand") or request.query_params.get("brand")
+        if not bid:
+            return None
+        qs = Brand.objects.select_related("organization")
+        if not request.user.is_superuser:
+            qs = qs.filter(organization__in=request.user.organizations.all())
+        return qs.filter(pk=bid).first()
+
+    def _get_or_new(self, request, brand):
+        """Update an existing DRAFT when `id` is posted, else start a fresh record."""
+        from apps.organizations.models import Mailbox
+        cid = request.data.get("id")
+        if cid:
+            existing = self.get_queryset().filter(pk=cid).first()
+            if existing is not None:
+                return existing
+        return ComposedEmail(organization=brand.organization, brand=brand,
+                             mailbox=Mailbox.objects.filter(brand=brand).first(),
+                             created_by=self._actor())
+
+    def _apply_fields(self, obj, request):
+        obj.from_email = (request.data.get("from_email") or "").strip()
+        obj.to_addrs = (request.data.get("to") or request.data.get("to_addrs") or "").strip()
+        obj.cc = (request.data.get("cc") or "").strip()
+        obj.bcc = (request.data.get("bcc") or "").strip()
+        obj.subject = (request.data.get("subject") or "").strip()
+        obj.body_html = request.data.get("body_html") or ""
+        obj.body_text = request.data.get("body_text") or ""
+
+    def _store_files(self, request, obj):
+        for f in request.FILES.getlist("attachments"):
+            content = f.read()
+            Attachment.objects.create(
+                composed_email=obj, filename=f.name, content_type=f.content_type or "",
+                size=len(content), file=ContentFile(content, name=f.name))
+
+    @action(detail=False, methods=["post"])
+    def draft(self, request):
+        """Save (or update) a draft -- no email is sent."""
+        brand = self._brand(request)
+        if brand is None:
+            return Response({"detail": "A valid brand is required."},
+                            status=http_status.HTTP_400_BAD_REQUEST)
+        obj = self._get_or_new(request, brand)
+        self._apply_fields(obj, request)
+        obj.status = ComposedEmail.STATUS_DRAFT
+        obj.save()
+        self._store_files(request, obj)
+        logger.info("COMPOSE-DRAFT-SAVED id=%s by=%s to=%s", obj.id, self._actor(), obj.to_addrs)
+        return Response(self.get_serializer(obj).data, status=http_status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"])
+    def send(self, request):
+        """Send the composed email via the existing SMTP sender and record it (sent/failed)."""
+        from apps.ingestion.service import send_composed_email
+
+        brand = self._brand(request)
+        if brand is None:
+            return Response({"detail": "A valid brand is required."},
+                            status=http_status.HTTP_400_BAD_REQUEST)
+        obj = self._get_or_new(request, brand)
+        self._apply_fields(obj, request)
+        if not obj.to_addrs:
+            return Response({"detail": "At least one recipient (To) is required."},
+                            status=http_status.HTTP_400_BAD_REQUEST)
+        obj.save()
+        self._store_files(request, obj)
+
+        # Carry ALL attachments -- any saved earlier on this draft PLUS the ones just uploaded.
+        email_atts = []
+        for a in obj.attachments.all().order_by("created_at"):
+            try:
+                with a.file.open("rb") as fh:
+                    email_atts.append((a.filename, fh.read(),
+                                       a.content_type or "application/octet-stream"))
+            except Exception:  # noqa: BLE001 -- a missing file must not abort the send
+                logger.exception("Compose: could not read attachment %s", a.id)
+
+        sent_id = send_composed_email(
+            to=obj.to_addrs, subject=obj.subject, body_text=obj.body_text,
+            body_html=obj.body_html or None, from_email=obj.from_email,
+            cc=obj.cc or None, bcc=obj.bcc or None,
+            attachments=email_atts or None, mailbox=obj.mailbox)
+
+        if sent_id:
+            obj.status = ComposedEmail.STATUS_SENT
+            obj.message_id = sent_id
+            obj.error = ""
+            obj.sent_at = timezone.now()
+            # Seed the Gmail-style thread with this outbound message (so a customer reply appends
+            # to it and the conversation view has a first entry). thread_refs = its Message-ID.
+            obj.add_message(self._outbound_entry(obj, sent_id))
+            obj.save(update_fields=["status", "message_id", "error", "sent_at",
+                                    "conversation", "thread_refs", "updated_at"])
+            logger.info("COMPOSE-SENT id=%s by=%s to=%s message_id=%s",
+                        obj.id, self._actor(), obj.to_addrs, sent_id)
+            return Response(self.get_serializer(obj).data)
+
+        obj.status = ComposedEmail.STATUS_FAILED
+        obj.error = "SMTP send failed (see SMTP-SEND-FAILED / COMPOSE-SEND-FAILED logs)."
+        obj.save(update_fields=["status", "error", "updated_at"])
+        data = self.get_serializer(obj).data
+        data["send_failed"] = True
+        data["detail"] = ("The email could NOT be sent (SMTP failed). It was saved as Failed so "
+                          "you can retry. Check SMTP settings / the backend logs.")
+        return Response(data, status=http_status.HTTP_502_BAD_GATEWAY)
+
+    def _attachment_meta(self, obj, since_id=0):
+        """Downloadable metadata for this thread's stored files (optionally only those newer than
+        `since_id`, to attribute freshly-uploaded files to the latest outbound message)."""
+        return [{
+            "filename": a.filename, "content_type": a.content_type or "",
+            "url": f"/api/attachments/{a.id}/",
+        } for a in obj.attachments.all().order_by("created_at") if a.id > since_id]
+
+    def _outbound_entry(self, obj, message_id, *, in_reply_to="", since_id=0):
+        """Build an outbound conversation entry from the composed email's current fields."""
+        return {
+            "direction": "outbound",
+            "from": obj.from_email, "to": obj.to_addrs, "cc": obj.cc, "bcc": obj.bcc,
+            "subject": obj.subject, "body_html": obj.body_html, "body_text": obj.body_text,
+            "message_id": message_id, "in_reply_to": in_reply_to,
+            "agent": self._actor(), "at": timezone.now().isoformat(),
+            "attachments": self._attachment_meta(obj, since_id=since_id),
+        }
+
+    @action(detail=True, methods=["post"])
+    def reply(self, request, pk=None):
+        """Agent replies WITHIN an existing Compose thread. Sends with In-Reply-To / References
+        (RFC threading) so the customer's client keeps it in the same conversation, then appends
+        the outbound message to this thread. Body: multipart (body_html/body_text/attachments);
+        `to` defaults to the last customer reply's sender, else the original recipient."""
+        from apps.ingestion.service import send_composed_email
+
+        obj = self.get_object()
+        before_max = max([a.id for a in obj.attachments.all()], default=0)
+        # New files uploaded with this reply.
+        self._store_files(request, obj)
+
+        # Recipient: explicit `to`, else the last inbound sender, else the original To.
+        last_inbound = next((c for c in reversed(obj.conversation or [])
+                             if c.get("direction") == "inbound"), None)
+        to = (request.data.get("to") or "").strip() or \
+            (last_inbound or {}).get("from") or obj.to_addrs
+        subject = (request.data.get("subject") or "").strip() or \
+            (obj.subject if obj.subject.lower().startswith("re:") else f"Re: {obj.subject}")
+        body_html = request.data.get("body_html") or ""
+        body_text = request.data.get("body_text") or ""
+
+        # RFC threading: In-Reply-To = the most recent message id; References = the whole thread.
+        refs = [r for r in (obj.thread_refs or "").split() if r]
+        in_reply_to = (last_inbound or {}).get("message_id") or (refs[-1] if refs else "") or obj.message_id
+
+        # Only the files just attached to THIS reply travel on it.
+        reply_atts = []
+        for a in obj.attachments.all().order_by("created_at"):
+            if a.id <= before_max:
+                continue
+            try:
+                with a.file.open("rb") as fh:
+                    reply_atts.append((a.filename, fh.read(),
+                                       a.content_type or "application/octet-stream"))
+            except Exception:  # noqa: BLE001
+                logger.exception("Compose reply: could not read attachment %s", a.id)
+
+        sent_id = send_composed_email(
+            to=to, subject=subject, body_text=body_text, body_html=body_html or None,
+            from_email=obj.from_email, attachments=reply_atts or None, mailbox=obj.mailbox,
+            in_reply_to=in_reply_to, references=refs or None)
+
+        if not sent_id:
+            data = self.get_serializer(obj).data
+            data["send_failed"] = True
+            data["detail"] = "The reply could NOT be sent (SMTP failed). Check settings / logs."
+            return Response(data, status=http_status.HTTP_502_BAD_GATEWAY)
+
+        entry = self._outbound_entry(obj, sent_id, in_reply_to=in_reply_to, since_id=before_max)
+        entry["to"] = to
+        entry["subject"] = subject
+        entry["body_html"] = body_html
+        entry["body_text"] = body_text
+        obj.add_message(entry)
+        obj.is_read = True
+        obj.save(update_fields=["conversation", "thread_refs", "is_read", "updated_at"])
+        logger.info("COMPOSE-REPLY-SENT composed=%s by=%s to=%s message_id=%s",
+                    obj.id, self._actor(), to, sent_id)
+        return Response(self.get_serializer(obj).data)
+
+    @action(detail=True, methods=["post"], url_path="mark-read")
+    def mark_read(self, request, pk=None):
+        """Mark a thread read (opening the conversation clears the unread dot)."""
+        obj = self.get_object()
+        if not obj.is_read:
+            obj.is_read = True
+            obj.save(update_fields=["is_read", "updated_at"])
+        return Response(self.get_serializer(obj).data)

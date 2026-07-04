@@ -85,6 +85,19 @@ MAILS = {
                "  - ઓર્ડર નંબર\n  - AWB / ટ્રેકિંગ નંબર\n  - રજિસ્ટર્ડ ઈમેલ આઈડી\n\n"
                "અમારી ટીમ તમારી રદ કરવાની વિનંતીની સમીક્ષા કરશે."),
     },
+    # M_CANCEL_NOT_FOUND — order cancellation: the identifier the customer sent could NOT be
+    # verified against Shopify / the courier -> ask for a VALID one. No ticket is created.
+    "M_CANCEL_NOT_FOUND": {
+        "en": ("We couldn't find this order",
+               "We couldn't find this order number. Please check it and send a valid Order "
+               "Number, AWB, or Registered Email."),
+        "hi": ("हमें यह ऑर्डर नहीं मिला",
+               "हमें यह ऑर्डर नंबर नहीं मिला। कृपया इसे जाँचें और एक सही ऑर्डर नंबर, AWB, या "
+               "रजिस्टर्ड ईमेल भेजें।"),
+        "gu": ("અમને આ ઓર્ડર મળ્યો નથી",
+               "અમને આ ઓર્ડર નંબર મળ્યો નથી. કૃપા કરીને તેને તપાસો અને માન્ય ઓર્ડર નંબર, AWB, "
+               "અથવા રજિસ્ટર્ડ ઈમેલ મોકલો."),
+    },
     # M_TRACK_LOOKUP — Shipment Tracking STEP 2: no identifier in the email -> ask for ANY
     # ONE of Order Number / Mobile / Email. No Shopify call, no ticket, no link.
     "M_TRACK_LOOKUP": {
@@ -203,6 +216,62 @@ MAILS = {
         "gu": ("તપાસ માટે પેમેન્ટ સ્ક્રીનશોટ જરૂરી છે",
                "કૃપા કરીને અપલોડ કરો:\n• પેમેન્ટ સ્ક્રીનશોટ (ફરજિયાત)\n\n"
                "આ અમને વ્યવહાર ચકાસવા અને સમસ્યાની તપાસ કરવામાં મદદ કરે છે."),
+    },
+    # --- Delivered-Item evidence requests (exact per-case wording; §"Delivered Item Related") ---
+    # The signature ("Regards, DeoDap Support Team") is appended by render(); bodies exclude it.
+    # These are sent in English (the spec wording) regardless of the customer's language.
+    # EV_DAMAGED — Damaged product: unboxing video AND clear images, both mandatory.
+    "EV_DAMAGED": {
+        "en": ("Photo & video required to register your complaint",
+               "Sorry to hear that.\n\n"
+               "To register your complaint, please reply with:\n\n"
+               "• Unboxing video (without cuts) (Mandatory)\n"
+               "• Clear images of the damaged product (Mandatory)"),
+    },
+    # EV_NON_WORKING — Non-working product: test after charging, then a video (only video mandatory).
+    "EV_NON_WORKING": {
+        "en": ("Please test the product and share a video",
+               "Sorry to hear that.\n\n"
+               "Before registering the complaint, please charge the product for 3–4 hours "
+               "and test it again.\n\n"
+               "If the issue still persists, please reply with:\n\n"
+               "• Clear video showing the product is not working."),
+    },
+    # EV_MISSING — Missing product: unboxing video AND image of the POS paper, both mandatory.
+    "EV_MISSING": {
+        "en": ("Video & POS paper required to register your complaint",
+               "Sorry to hear that.\n\n"
+               "Please reply with:\n\n"
+               "• Unboxing video (without cuts)\n"
+               "• Image of the POS paper\n\n"
+               "Both are mandatory."),
+    },
+    # EV_WRONG_PRODUCT — Wrong product received: video, images and the SKU, all mandatory.
+    "EV_WRONG_PRODUCT": {
+        "en": ("Video, photo & SKU required to register your complaint",
+               "Sorry to hear that.\n\n"
+               "Please reply with:\n\n"
+               "• Unboxing video (without cuts)\n"
+               "• Clear images of the wrong product\n"
+               "• SKU of the wrong product"),
+    },
+    # EV_WRONG_PARCEL — Wrong parcel received: POS + all product images + count + shipping label.
+    "EV_WRONG_PARCEL": {
+        "en": ("Photos & parcel details required to register your complaint",
+               "Sorry to hear that.\n\n"
+               "Please reply with:\n\n"
+               "• Image of the POS paper\n"
+               "• Clear images of all products received\n"
+               "• Product count received\n"
+               "• Image of the parcel shipping label"),
+    },
+    # EV_DEFECTIVE — Defective product: images showing the defect AND a video, both mandatory.
+    "EV_DEFECTIVE": {
+        "en": ("Photo & video required to register your complaint",
+               "Sorry to hear that.\n\n"
+               "Please reply with:\n\n"
+               "• Clear images showing the defect\n"
+               "• Video clearly demonstrating the defect"),
     },
     # (M3 "order# + phone required" was REMOVED -- order id / phone no longer block
     #  ticket creation, so no such request is ever sent.)

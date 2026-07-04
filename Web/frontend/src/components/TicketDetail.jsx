@@ -84,7 +84,8 @@ export default function TicketDetail() {
   return (
     <div>
       <div className="row" style={{ marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>{ticket.ticket_id}</h3>
+        {/* Care Panel (Gallabox) ticket number from store-json -- never the internal TKT id. */}
+        <h3 style={{ margin: 0 }}>{ticket.ticket_number || "—"}</h3>
         <StatusBadge status={ticket.status} label={ticket.status_display} />
         <PriorityBadge priority={ticket.priority} label={ticket.priority_display} />
         {ticket.is_ignored && <span className="badge">ignored</span>}

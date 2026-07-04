@@ -224,13 +224,33 @@ class ShopifyClient:
         """Map a raw Shopify order to engine facts (also used to normalize fakes)."""
         fulfillment = (order.get("fulfillment_status") or "").lower()
         fulfillments = order.get("fulfillments") or []
-        tracking_url = ""
-        awb = ""
-        courier = ""
-        if fulfillments:
+        # ALL shipments: an order can be fulfilled in several packages, each with its own
+        # tracking number (a single fulfillment can even carry several). Collect EVERY tracking
+        # number across EVERY fulfillment so the tracking flow checks each one -- not just the
+        # first. Deduped by AWB, in order. `shipments` = [{awb, courier, tracking_url}].
+        shipments = []
+        seen_awbs = set()
+        for f in fulfillments:
+            company = (f.get("tracking_company") or f.get("carrier") or "")
+            numbers = f.get("tracking_numbers") or (
+                [f.get("tracking_number")] if f.get("tracking_number") else [])
+            urls = f.get("tracking_urls") or (
+                [f.get("tracking_url")] if f.get("tracking_url") else [])
+            for i, num in enumerate(numbers):
+                num = (num or "").strip()
+                if not num or num in seen_awbs:
+                    continue
+                seen_awbs.add(num)
+                url = urls[i] if i < len(urls) else (urls[0] if urls else "")
+                shipments.append({"awb": num, "courier": company, "tracking_url": url or ""})
+        # Back-compat single fields = the FIRST shipment (existing single-tracking behavior).
+        tracking_url = shipments[0]["tracking_url"] if shipments else ""
+        awb = shipments[0]["awb"] if shipments else ""
+        courier = shipments[0]["courier"] if shipments else ""
+        if not shipments and fulfillments:
+            # A fulfillment with a tracking URL but no number -> keep the URL for the link.
             tracking_url = (fulfillments[0].get("tracking_url")
                             or (fulfillments[0].get("tracking_urls") or [""])[0] or "")
-            awb = fulfillments[0].get("tracking_number") or ""
             courier = (fulfillments[0].get("tracking_company")
                        or fulfillments[0].get("carrier") or "")
         line_items = order.get("line_items") or []
@@ -283,6 +303,7 @@ class ShopifyClient:
             "tracking_url": tracking_url,
             "awb": awb,
             "courier": courier,
+            "shipments": shipments,          # every tracking number across all fulfillments
             "custom_item": custom_item,
             "financial_status": (order.get("financial_status") or "").lower(),
             "customer_name": customer_name,

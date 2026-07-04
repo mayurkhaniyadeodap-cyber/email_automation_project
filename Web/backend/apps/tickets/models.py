@@ -131,6 +131,13 @@ class Ticket(TimestampedModel):
     # Stamped when the ticket first reaches a terminal status (for SLA analytics).
     resolved_at = models.DateTimeField(null=True, blank=True)
 
+    # Gmail-style Inbox ordering: the timestamp of the LATEST message on the thread (inbound or
+    # outbound), NOT the ticket's creation time. Bumped by Message.save() so a customer reply moves
+    # the conversation to the top of the Inbox. `agent_unread` flips True on a new INBOUND message
+    # and is cleared when an agent opens the ticket (the bold/unread row + dot).
+    last_activity_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    agent_unread = models.BooleanField(default=False, db_index=True)
+
     # Statuses that count as "closed out" for SLA / analytics.
     TERMINAL_STATUSES = (STATUS_RESOLVED, STATUS_CLOSED, STATUS_AUTO_RESOLVED)
 
@@ -139,6 +146,7 @@ class Ticket(TimestampedModel):
         indexes = [
             models.Index(fields=["brand", "status"]),
             models.Index(fields=["brand", "is_ignored"]),
+            models.Index(fields=["brand", "last_activity_at"]),
         ]
 
     def __str__(self):
@@ -165,6 +173,10 @@ class Ticket(TimestampedModel):
     def save(self, *args, **kwargs):
         if not self.ticket_id:
             self.ticket_id = self.generate_ticket_id()
+        # Seed last_activity_at on first save so every ticket sorts sensibly in the Inbox even
+        # before its first reply (Message.save bumps it thereafter).
+        if self.last_activity_at is None:
+            self.last_activity_at = timezone.now()
 
         # Stamp / clear resolved_at as the ticket enters or leaves a terminal status.
         is_terminal = self.status in self.TERMINAL_STATUSES
@@ -224,6 +236,19 @@ class Message(TimestampedModel):
     class Meta:
         ordering = ["created_at"]
 
+    def save(self, *args, **kwargs):
+        is_new = self._state.adding
+        super().save(*args, **kwargs)
+        # Gmail behaviour: a new message on a thread moves that conversation to the TOP of the
+        # Inbox (ordered by last_activity_at) -- no new ticket/row. A new INBOUND (customer)
+        # message also marks the ticket unread for the agent. Drafts don't count as activity.
+        # A direct queryset .update() avoids a recursive Ticket.save() and is cheap.
+        if is_new and not self.is_draft and self.ticket_id:
+            fields = {"last_activity_at": timezone.now()}
+            if self.direction == self.DIRECTION_INBOUND:
+                fields["agent_unread"] = True
+            Ticket.objects.filter(pk=self.ticket_id).update(**fields)
+
     def __str__(self):
         return f"{self.ticket.ticket_id} :: {self.get_direction_display()}"
 
@@ -252,6 +277,11 @@ class Attachment(TimestampedModel):
         "InternalEmail", on_delete=models.CASCADE, null=True, blank=True,
         related_name="email_attachments",
     )
+    # An attachment on a Compose-page email (no ticket).
+    composed_email = models.ForeignKey(
+        "ComposedEmail", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="attachments",
+    )
     message = models.ForeignKey(
         Message, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="stored_attachments",
@@ -271,7 +301,8 @@ class Attachment(TimestampedModel):
         ordering = ["created_at"]
 
     def __str__(self):
-        return f"{self.ticket.ticket_id} :: {self.filename}"
+        owner = self.ticket.ticket_id if self.ticket_id else f"attachment#{self.pk}"
+        return f"{owner} :: {self.filename}"
 
     @property
     def kind(self):
@@ -585,3 +616,68 @@ class InternalEmail(TimestampedModel):
 
     def __str__(self):
         return f"INTERNAL[{self.matched_recipient}] {self.sender}"
+
+
+class ComposedEmail(TimestampedModel):
+    """A NEW email an agent composes and sends from the Compose page (Gmail-like). Completely
+    standalone: it NEVER creates or updates a ticket, escalation, pending or internal email. It
+    only records the message the agent wrote (draft or sent) so there is a history of outbound
+    mail. Sent via the SAME SMTP sender as every other outbound email (ingestion.send_composed_email
+    -> smtp_client.send_email); the chosen From is a validated brand SupportEmail alias."""
+
+    STATUS_DRAFT = "draft"
+    STATUS_SENT = "sent"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_SENT, "Sent"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE,
+                                     related_name="composed_emails")
+    brand = models.ForeignKey(Brand, on_delete=models.CASCADE, related_name="composed_emails")
+    mailbox = models.ForeignKey(Mailbox, on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name="composed_emails")
+
+    from_email = models.CharField(max_length=255, blank=True, default="")   # chosen alias
+    to_addrs = models.TextField(blank=True, default="")                     # comma/space separated
+    cc = models.TextField(blank=True, default="")
+    bcc = models.TextField(blank=True, default="")
+    subject = models.CharField(max_length=500, blank=True, default="")
+    body_html = models.TextField(blank=True, default="")
+    body_text = models.TextField(blank=True, default="")
+
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES,
+                              default=STATUS_DRAFT, db_index=True)
+    message_id = models.CharField(max_length=255, blank=True, default="")   # first outbound Message-ID
+    error = models.TextField(blank=True, default="")                        # last send error
+    created_by = models.CharField(max_length=150, blank=True, default="")   # agent
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    # Gmail-style threading. `conversation` is the ordered thread
+    # [{direction: outbound|inbound, from, to, subject, body_html, body_text, message_id,
+    #   in_reply_to, at, agent, attachments:[{filename,url,content_type}]}].
+    # `thread_refs` is a space-joined string of EVERY RFC Message-ID in the thread (outbound +
+    # inbound) -- an incoming reply is matched to this thread when its In-Reply-To / References
+    # contains any of these ids (SQLite-friendly LIKE lookup). `is_read` flips to False when a
+    # customer reply arrives. Optional `ticket` link if this thread is ever tied to a ticket.
+    conversation = models.JSONField(default=list, blank=True)
+    thread_refs = models.TextField(blank=True, default="")
+    is_read = models.BooleanField(default=True, db_index=True)
+    ticket = models.ForeignKey("Ticket", on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name="composed_emails")
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["brand", "status"])]
+
+    def add_message(self, entry):
+        """Append a thread entry and register its Message-ID for reply matching. Caller saves."""
+        self.conversation = list(self.conversation or []) + [entry]
+        mid = (entry.get("message_id") or "").strip()
+        if mid and mid not in (self.thread_refs or ""):
+            self.thread_refs = f"{self.thread_refs} {mid}".strip()
+
+    def __str__(self):
+        return f"COMPOSED[{self.status}] {self.to_addrs}"

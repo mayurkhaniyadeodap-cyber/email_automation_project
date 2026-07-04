@@ -4,9 +4,14 @@ Upload customer photo/video attachments to the DeoDap Care Panel so they show un
 
 Mechanism (discovered + verified live against the tracking page's comment form):
 
-    GET  https://care.deodap.in/t?id=<hashId>     -> CSRF _token + laravel_session
+    GET  https://care.deodap.in/t?id=<hashId>     -> XSRF-TOKEN + laravel_session cookies
     POST https://care.deodap.in/t/add_comment     (multipart/form-data)
-         _token=<csrf>  hashId=<hash>  comment=<text>  attachments[]=<file>...
+         header X-XSRF-TOKEN=<urldecoded XSRF-TOKEN cookie>   (Laravel cookie CSRF)
+         hashId=<hash>  comment=<text>  attachments[]=<file>...
+
+NOTE: the panel dropped the server-rendered ``name="_token"`` hidden field; it now uses
+the cookie-based CSRF above. Sending the old ``_token`` (or none) returns HTTP 419 and the
+comment is silently discarded. See ``_csrf()``.
 
 The hashId is the open-tickets `id` (the t?id= value), stored on the ticket as
 extracted["care_panel_ticket_id"]. Accepted types: image/jpeg, image/png, video/mp4,
@@ -19,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,38 @@ ACCEPTED_TYPES = {"image/jpeg", "image/jpg", "image/png", "video/mp4",
                   "video/quicktime", "application/pdf"}
 _TOKEN_RE = re.compile(r'name="_token"\s+value="([^"]+)"')
 DEFAULT_COMMENT = "Customer shared photo / video evidence."
+
+
+def _csrf(session, hash_id):
+    """Establish a CSRF-authenticated session for POST /t/add_comment and return
+    ``(headers, data_extra, ok, status)``.
+
+    The external Care Panel (Laravel) NO LONGER renders a ``name="_token"`` hidden
+    field on the /t page -- it now relies on the framework's cookie CSRF: the
+    ``XSRF-TOKEN`` cookie handed out on the GET must be echoed back (URL-decoded)
+    in the ``X-XSRF-TOKEN`` request header. Sending the old ``_token`` form field
+    (or nothing) now yields HTTP 419 "CSRF token mismatch" and the comment is never
+    stored -- which silently broke BOTH media uploads and conversation sync.
+
+    We GET the page first so the session captures ``XSRF-TOKEN`` + ``laravel_session``
+    cookies, prefer the cookie->header path (proven to pass CSRF), and still fold in a
+    scraped ``_token`` as a body field when the page happens to expose one (older panel
+    builds) so this works against both versions."""
+    page = session.get(f"{TRACKING_BASE}/t?id={hash_id}", timeout=20)
+    headers = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+    data_extra = {}
+    xsrf = None
+    try:
+        xsrf = session.cookies.get("XSRF-TOKEN")
+    except Exception:  # noqa: BLE001 -- some fake sessions have no cookie jar
+        xsrf = None
+    if xsrf:
+        headers["X-XSRF-TOKEN"] = urllib.parse.unquote(xsrf)
+    m = _TOKEN_RE.search(page.text or "")
+    if m:
+        data_extra["_token"] = m.group(1)          # legacy hidden field, still honoured if present
+    ok = bool(xsrf or data_extra)
+    return headers, data_extra, ok, page.status_code
 
 # The external Care Panel's nginx caps the upload body at ~1 MB (verified by probe). Target
 # the compressed video safely under that -- the multipart form fields + boundaries also count
@@ -183,13 +221,11 @@ def upload_attachments(ticket, comment=None, session=None):
         session = requests.Session()
 
     try:
-        page = session.get(f"{TRACKING_BASE}/t?id={hash_id}", timeout=20)
-        m = _TOKEN_RE.search(page.text or "")
-        if not m:
-            logger.error("Care Panel media %s: CSRF _token not found on tracking page "
-                         "(hashId=%s, status=%s).", ticket.ticket_id, hash_id, page.status_code)
+        headers, csrf_data, ok, status = _csrf(session, hash_id)
+        if not ok:
+            logger.error("Care Panel media %s: no CSRF (XSRF-TOKEN cookie / _token) on tracking "
+                         "page (hashId=%s, status=%s).", ticket.ticket_id, hash_id, status)
             return 0
-        token = m.group(1)
 
         # Upload ONE FILE PER REQUEST. The external Care Panel's nginx caps the request body
         # (client_max_body_size), so a single multi-MB video 413s -- and batching all files in
@@ -218,15 +254,14 @@ def upload_attachments(ticket, comment=None, session=None):
                     logger.warning("Care Panel media: could not shrink %s under %d bytes; "
                                    "attempting original (expect 413 until care.deodap.in raises "
                                    "client_max_body_size).", fname, CARE_PANEL_MAX_BYTES)
-            data = {"_token": token, "hashId": hash_id, "comment": comment or DEFAULT_COMMENT}
+            data = {"hashId": hash_id, "comment": comment or DEFAULT_COMMENT, **csrf_data}
             files = [("attachments[]", (fname, content, ctype))]
             logger.info("Care Panel add_comment UPLOAD ticket=%s hashId=%s file=%s size=%d",
                         ticket.ticket_id, hash_id, fname, len(content))
             try:
                 resp = session.post(
                     f"{TRACKING_BASE}/t/add_comment", data=data, files=files,
-                    headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-                    timeout=120,
+                    headers=headers, timeout=120,
                 )
             except Exception:  # noqa: BLE001 -- one bad file must not abort the rest
                 logger.exception("Care Panel media POST ERROR ticket=%s file=%s",
@@ -307,13 +342,11 @@ def sync_conversation(ticket, session=None):
 
     posted = 0
     try:
-        page = session.get(f"{TRACKING_BASE}/t?id={hash_id}", timeout=20)
-        m = _TOKEN_RE.search(page.text or "")
-        if not m:
-            logger.error("Care Panel conversation %s: CSRF _token not found (hashId=%s, status=%s).",
-                         ticket.ticket_id, hash_id, page.status_code)
+        headers, csrf_data, ok, status = _csrf(session, hash_id)
+        if not ok:
+            logger.error("Care Panel conversation %s: no CSRF (XSRF-TOKEN cookie / _token) "
+                         "(hashId=%s, status=%s).", ticket.ticket_id, hash_id, status)
             return 0
-        token = m.group(1)
         for c in pending:
             label = "🟢 Customer" if c["sender"] == "Customer" else "🔵 DeoDap Support"
             subj = f"Subject: {c['subject']}\n" if c["subject"] else ""
@@ -321,9 +354,8 @@ def sync_conversation(ticket, session=None):
             try:
                 resp = session.post(
                     f"{TRACKING_BASE}/t/add_comment",
-                    data={"_token": token, "hashId": hash_id, "comment": comment},
-                    headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"},
-                    timeout=60)
+                    data={"hashId": hash_id, "comment": comment, **csrf_data},
+                    headers=headers, timeout=60)
             except Exception:  # noqa: BLE001 -- one bad message must not abort the rest
                 logger.exception("Care Panel conversation POST error ticket=%s msg=%s",
                                  ticket.ticket_id, c["_id"])
