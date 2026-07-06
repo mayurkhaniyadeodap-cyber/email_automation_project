@@ -12,6 +12,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import TableSortLabel from "@mui/material/TableSortLabel";
 import TextField from "@mui/material/TextField";
+import SearchAutocomplete from "./SearchAutocomplete";
 import Typography from "@mui/material/Typography";
 import DownloadIcon from "@mui/icons-material/Download";
 import { api } from "../api";
@@ -139,8 +140,10 @@ export default function TicketList() {
     setPage(1);
   }
 
-  function runSearch() {
-    setAppliedSearch(search);
+  function runSearch(t) {
+    const v = t !== undefined ? t : search;   // autocomplete passes the picked/typed text
+    setSearch(v);
+    setAppliedSearch(v);
     setPage(1);
   }
 
@@ -250,12 +253,11 @@ export default function TicketList() {
                     disabled={!since && !until}>Apply</Button>
           </>
         )}
-        <TextField size="small"
-                   placeholder="Search Ticket No. / Customer / Email / Subject / Order No."
-                   value={search} onChange={(e) => setSearch(e.target.value)}
-                   onKeyDown={(e) => e.key === "Enter" && runSearch()}
-                   sx={{ minWidth: 340, flexGrow: 1 }} />
-        <Button variant="outlined" onClick={runSearch}>Search</Button>
+        <SearchAutocomplete
+          value={search} onChange={setSearch} onSearch={(t) => runSearch(t)}
+          placeholder="Search Ticket No. / Customer / Email / Subject / Order No."
+          sx={{ minWidth: 340, flexGrow: 1 }} orgId={orgId} brandId={brandId} />
+        <Button variant="outlined" onClick={() => runSearch()}>Search</Button>
         <Box sx={{ flexGrow: 1 }} />
         <Button variant="outlined" startIcon={<DownloadIcon />} onClick={exportCsv}
                 disabled={count === 0}>Export CSV</Button>

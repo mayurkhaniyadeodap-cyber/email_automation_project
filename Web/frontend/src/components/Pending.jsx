@@ -10,6 +10,7 @@ import TableContainer from "@mui/material/TableContainer";
 import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import TextField from "@mui/material/TextField";
+import SearchAutocomplete from "./SearchAutocomplete";
 import Typography from "@mui/material/Typography";
 import DownloadIcon from "@mui/icons-material/Download";
 import { api } from "../api";
@@ -25,11 +26,12 @@ export default function Pending() {
   const [count, setCount] = useState(0);
   const [loading, setLoading] = useState(false);
 
-  async function load() {
+  async function load(searchArg) {
     if (!brandId) return;
     setLoading(true);
     try {
-      const scope = { organization: orgId, brand: brandId, search };
+      const s = searchArg !== undefined ? searchArg : search;
+      const scope = { organization: orgId, brand: brandId, search: s };
       // Held conversations (no ticket) + tickets already created but awaiting evidence.
       const [pend, tix] = await Promise.all([
         api.get("/pending/", scope),
@@ -78,10 +80,11 @@ export default function Pending() {
       <Typography variant="h5" sx={{ mb: 2 }}>{title} ({count})</Typography>
 
       <Box sx={{ display: "flex", gap: 2, mb: 2, alignItems: "center" }}>
-        <TextField size="small" placeholder="Search email / order / phone…"
-                   value={search} onChange={(e) => setSearch(e.target.value)}
-                   onKeyDown={(e) => e.key === "Enter" && load()} sx={{ minWidth: 280 }} />
-        <Button variant="outlined" onClick={load}>Search</Button>
+        <SearchAutocomplete
+          value={search} onChange={setSearch} onSearch={(t) => load(t)}
+          placeholder="Search email / order / phone…" sx={{ minWidth: 280 }}
+          orgId={orgId} brandId={brandId} />
+        <Button variant="outlined" onClick={() => load()}>Search</Button>
         <Box sx={{ flexGrow: 1 }} />
         <Button variant="outlined" startIcon={<DownloadIcon />} onClick={exportCsv}
                 disabled={count === 0}>Export CSV</Button>

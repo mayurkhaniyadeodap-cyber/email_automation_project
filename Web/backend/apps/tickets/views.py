@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 
 def _range_window(params):
-    """(since, until) dates from ?range=today|yesterday|7d|30d, or explicit ?since=&until=."""
+    """(since, until) dates from ?range=today|yesterday|7d|30d|this_month|last_month, or explicit
+    ?since=&until= (Custom Date). Returns (None, None) for 'All Time' / no range."""
     from datetime import date, timedelta
 
     rng = params.get("range")
@@ -42,6 +43,12 @@ def _range_window(params):
         return today - timedelta(days=6), today
     if rng == "30d":
         return today - timedelta(days=29), today
+    if rng == "this_month":
+        return today.replace(day=1), today
+    if rng == "last_month":
+        first_of_this = today.replace(day=1)
+        last_of_prev = first_of_this - timedelta(days=1)     # last day of the previous month
+        return last_of_prev.replace(day=1), last_of_prev
 
     def _d(v):
         try:

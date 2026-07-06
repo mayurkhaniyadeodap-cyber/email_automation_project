@@ -3,7 +3,11 @@ import { useNavigate, useOutletContext, useSearchParams } from "react-router-dom
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Card from "@mui/material/Card";
+import FormControl from "@mui/material/FormControl";
+import InputLabel from "@mui/material/InputLabel";
+import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
+import Select from "@mui/material/Select";
 import Tab from "@mui/material/Tab";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
@@ -16,12 +20,26 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import { api } from "../api";
 import { StatusChip, fmtDate } from "./chips.jsx";
+import SearchAutocomplete from "./SearchAutocomplete";
 
 const TABS = [
   ["all", "ALL", { ignored: "false" }],
   ["classified", "CLASSIFIED", { ignored: "false", status: "classified" }],
   ["ticketed", "TICKETED", { ignored: "false", status: "awaiting_agent" }],
   ["ignored", "IGNORED", { ignored: "true" }],
+];
+
+// Date-range options for the Inbox "Range" dropdown. Value = the ?range= sent to the API
+// ("" = All Time -> no server filter). "custom" reveals start/end date pickers (?since=&until=).
+const RANGES = [
+  ["", "All Time"],
+  ["today", "Today"],
+  ["yesterday", "Yesterday"],
+  ["7d", "Last 7 Days"],
+  ["30d", "Last 30 Days"],
+  ["this_month", "This Month"],
+  ["last_month", "Last Month"],
+  ["custom", "Custom Date"],
 ];
 
 export default function Inbox() {
@@ -32,6 +50,10 @@ export default function Inbox() {
   const initialTab = params.get("status") === "ignored" ? 3 : 0;
   const [tab, setTab] = useState(initialTab);
   const [search, setSearch] = useState("");
+  // Date-range filter -- persisted in localStorage so it survives navigating away and back.
+  const [range, setRange] = useState(() => localStorage.getItem("inboxRange") || "");
+  const [since, setSince] = useState(() => localStorage.getItem("inboxSince") || "");
+  const [until, setUntil] = useState(() => localStorage.getItem("inboxUntil") || "");
   const [rows, setRows] = useState([]);
   const [count, setCount] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -51,11 +73,16 @@ export default function Inbox() {
   useEffect(() => { setTab(params.get("status") === "ignored" ? 3 : 0); },
     [params]); // react to card navigation
 
-  async function load() {
+  async function load(searchArg) {
     if (!brandId) return;
     setLoading(true);
     try {
-      const scope = { organization: orgId, brand: brandId, search };
+      // Server-side date-range params (empty for All Time). Custom uses since/until.
+      const rangeParams = range === "custom"
+        ? { ...(since ? { since } : {}), ...(until ? { until } : {}) }
+        : (range ? { range } : {});
+      const s = searchArg !== undefined ? searchArg : search;
+      const scope = { organization: orgId, brand: brandId, search: s, ...rangeParams };
       const data = await api.get("/tickets/", { ...scope, ...TABS[tab][2] });
       let list = (data.results || data).map((t) => ({ ...t, _kind: "ticket" }));
       // The ALL tab also surfaces HELD conversations (no ticket yet -- verification
@@ -84,7 +111,7 @@ export default function Inbox() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orgId, brandId, tab, refreshKey]);
+  }, [orgId, brandId, tab, refreshKey, range, since, until]);
 
   return (
     <Box>
@@ -98,12 +125,40 @@ export default function Inbox() {
             {TABS.map(([k, label]) => <Tab key={k} label={label} />)}
           </Tabs>
         </Card>
-        <TextField
-          size="small" placeholder="Search subject / sender…"
-          value={search} onChange={(e) => setSearch(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && load()}
-          sx={{ minWidth: 280 }}
+        <SearchAutocomplete
+          value={search} onChange={setSearch} onSearch={(t) => load(t)}
+          placeholder="Search subject / sender…" sx={{ minWidth: 280 }}
+          orgId={orgId} brandId={brandId}
         />
+        <FormControl size="small" sx={{ minWidth: 150 }}>
+          <InputLabel id="inbox-range-label">Range</InputLabel>
+          <Select
+            labelId="inbox-range-label" label="Range" value={range}
+            onChange={(e) => {
+              const v = e.target.value;
+              setRange(v);
+              localStorage.setItem("inboxRange", v);
+            }}
+          >
+            {RANGES.map(([v, label]) => (
+              <MenuItem key={v || "all"} value={v}>{label}</MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        {range === "custom" && (
+          <>
+            <TextField
+              size="small" type="date" label="Start" InputLabelProps={{ shrink: true }}
+              value={since}
+              onChange={(e) => { setSince(e.target.value); localStorage.setItem("inboxSince", e.target.value); }}
+            />
+            <TextField
+              size="small" type="date" label="End" InputLabelProps={{ shrink: true }}
+              value={until}
+              onChange={(e) => { setUntil(e.target.value); localStorage.setItem("inboxUntil", e.target.value); }}
+            />
+          </>
+        )}
       </Box>
 
       <TableContainer component={Paper} variant="outlined">

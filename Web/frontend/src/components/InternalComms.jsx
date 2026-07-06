@@ -12,6 +12,7 @@ import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
+import SearchAutocomplete from "./SearchAutocomplete";
 import Typography from "@mui/material/Typography";
 import { api, attachmentUrl } from "../api";
 import { useSupportEmails } from "../useSupportEmails.js";
@@ -35,11 +36,12 @@ export default function InternalComms() {
   const [dialog, setDialog] = useState(null);   // 'reply' | 'forward' | 'note' | 'assign'
   const [form, setForm] = useState({});
 
-  async function loadList() {
+  async function loadList(searchArg) {
     if (!brandId) return;
+    const s = searchArg !== undefined ? searchArg : search;
     const q = { organization: orgId, brand: brandId };
     if (status) q.status = status;
-    if (search) q.search = search;
+    if (s) q.search = s;
     const res = await api.get("/internal-emails/", q);
     setRows(res.results || res);
   }
@@ -99,10 +101,11 @@ export default function InternalComms() {
           onChange={(e) => setParams(e.target.value ? { status: e.target.value } : {})}>
           {statusFilters.map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}
         </TextField>
-        <TextField size="small" placeholder="Search sender / subject / body…" value={search}
-          onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && loadList()}
-          sx={{ minWidth: 280 }} />
-        <Button variant="outlined" onClick={loadList}>Search</Button>
+        <SearchAutocomplete
+          value={search} onChange={setSearch} onSearch={(t) => loadList(t)}
+          placeholder="Search sender / subject / body…" sx={{ minWidth: 280 }}
+          orgId={orgId} brandId={brandId} />
+        <Button variant="outlined" onClick={() => loadList()}>Search</Button>
       </Stack>
 
       <Box sx={{ display: "flex", gap: 2, height: "calc(100vh - 240px)" }}>

@@ -391,3 +391,171 @@ class OrderOwnerNameRuleTests(TestCase):
         p = _payload(t)
         self.assertEqual(p["name"], "Ronny Misquitta")
         self.assertNotEqual(p["name"], "Chintan Dabhi")
+
+
+class RangeFilterTests(BaseFixture):
+    """Inbox 'Range' dropdown -> server-side date filter on created/received date. Covers the new
+    this_month / last_month options and Custom Date, on BOTH the ticket list and the pending list."""
+
+    def setUp(self):
+        super().setUp()
+        from django.utils import timezone
+        from datetime import timedelta
+        now = timezone.now()
+        today = now.date()
+        self.first_of_month = today.replace(day=1)
+        self.last_month_day = self.first_of_month - timedelta(days=5)   # a day inside last month
+
+        def at(dt_date):
+            # midday on the given date, timezone-aware
+            return timezone.make_aware(
+                __import__("datetime").datetime(dt_date.year, dt_date.month, dt_date.day, 12, 0))
+
+        self.t_today = self.make_ticket(subject="today one")
+        self.t_40d = self.make_ticket(subject="old one")
+        self.t_lastmonth = self.make_ticket(subject="last month one")
+        Ticket.objects.filter(pk=self.t_today.pk).update(created_at=now)
+        Ticket.objects.filter(pk=self.t_40d.pk).update(created_at=now - timedelta(days=40))
+        Ticket.objects.filter(pk=self.t_lastmonth.pk).update(created_at=at(self.last_month_day))
+
+    def _ids(self, url):
+        resp = self.api.get(url)
+        data = resp.data.get("results", resp.data)
+        return {t["id"] for t in data}
+
+    def test_all_time_default_shows_everything(self):
+        ids = self._ids("/api/tickets/")
+        self.assertEqual(ids, {self.t_today.id, self.t_40d.id, self.t_lastmonth.id})
+
+    def test_today_only(self):
+        self.assertEqual(self._ids("/api/tickets/?range=today"), {self.t_today.id})
+
+    def test_last_7_and_30_days_exclude_the_40d(self):
+        for r in ("7d", "30d"):
+            ids = self._ids(f"/api/tickets/?range={r}")
+            self.assertIn(self.t_today.id, ids)
+            self.assertNotIn(self.t_40d.id, ids)
+
+    def test_this_month(self):
+        ids = self._ids("/api/tickets/?range=this_month")
+        self.assertIn(self.t_today.id, ids)
+        self.assertNotIn(self.t_lastmonth.id, ids)   # last month excluded
+
+    def test_last_month(self):
+        ids = self._ids("/api/tickets/?range=last_month")
+        self.assertIn(self.t_lastmonth.id, ids)
+        self.assertNotIn(self.t_today.id, ids)       # this month excluded
+
+    def test_custom_since_until(self):
+        d = self.last_month_day.isoformat()
+        ids = self._ids(f"/api/tickets/?since={d}&until={d}")
+        self.assertEqual(ids, {self.t_lastmonth.id})
+
+    def test_range_works_with_tabs(self):
+        # Range + the IGNORED tab compose (both are server-side query params).
+        ig = self.make_ticket(subject="junk today", ignored=True)
+        from django.utils import timezone
+        Ticket.objects.filter(pk=ig.pk).update(created_at=timezone.now())
+        ids = self._ids("/api/tickets/?ignored=true&range=today")
+        self.assertEqual(ids, {ig.id})               # only today's ignored ticket
+
+    def test_pending_list_respects_range(self):
+        from apps.tickets.models import PendingConversation
+        from django.utils import timezone
+        from datetime import timedelta
+        p_today = PendingConversation.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="b@x.com", subject="held today", status="awaiting_evidence")
+        p_old = PendingConversation.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="b@x.com", subject="held old", status="awaiting_evidence")
+        PendingConversation.objects.filter(pk=p_old.pk).update(
+            created_at=timezone.now() - timedelta(days=40))
+        ids = self._ids("/api/pending/?range=today")
+        self.assertIn(p_today.id, ids)
+        self.assertNotIn(p_old.id, ids)
+
+
+class SuggestTests(BaseFixture):
+    """Global search autocomplete endpoint (/api/search/suggest/): cross-field, 2-char min,
+    <=10, case-insensitive, prefix-ranked, org-scoped, optional ?types= filter."""
+
+    def setUp(self):
+        super().setUp()
+        from apps.taxonomy.models import Category, SubTopic
+        self.t1 = Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="harimohan1902@gmail.com", subject="One item is missing",
+            sub_topic="Missing Item", status=Ticket.STATUS_ESCALATED,
+            extracted={"customer_name": "Hari Mohan", "order_id": "2607060220",
+                       "phone": "9876543210", "awb": "TRK123456789"})
+        self.t2 = Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="haripatel@gmail.com", subject="wrong parcel",
+            extracted={"customer_name": "Hari Patel"})
+        cat = Category.objects.create(brand=self.brand, code="3", name="Delivery Issues")
+        SubTopic.objects.create(category=cat, code="3.11", name="Missing Product")
+
+    def _sugg(self, q, **extra):
+        return self.api.get("/api/search/suggest/", {"q": q, **extra}).data["suggestions"]
+
+    def _vals(self, q, **extra):
+        return {s["value"] for s in self._sugg(q, **extra)}
+
+    def test_min_two_chars(self):
+        self.assertEqual(self._sugg("h"), [])
+        self.assertEqual(self._sugg(""), [])
+
+    def test_customer_name_and_email(self):
+        v = self._vals("hari")
+        self.assertIn("Hari Mohan", v)
+        self.assertIn("Hari Patel", v)
+        self.assertIn("harimohan1902@gmail.com", v)
+        self.assertIn("haripatel@gmail.com", v)
+
+    def test_category_and_subtopic(self):
+        v = self._vals("miss")
+        self.assertIn("Missing Item", v)        # ticket sub_topic
+        self.assertIn("Missing Product", v)     # taxonomy SubTopic name
+
+    def test_case_insensitive(self):
+        self.assertIn("Hari Mohan", self._vals("HARI"))
+
+    def test_order_phone_tracking(self):
+        self.assertIn("2607060220", self._vals("2607"))    # order id
+        self.assertIn("9876543210", self._vals("9876"))    # phone
+        self.assertIn("TRK123456789", self._vals("trk"))   # tracking / AWB (case-insensitive)
+
+    def test_status_and_priority(self):
+        self.assertIn("Escalated", self._vals("escal"))
+        self.assertIn("High", self._vals("hig"))
+
+    def test_types_filter(self):
+        res = self._sugg("hari", types="email")
+        self.assertTrue(res)
+        self.assertTrue(all(s["type"] == "email" for s in res))
+
+    def test_max_ten(self):
+        for i in range(14):
+            Ticket.objects.create(
+                organization=self.org, brand=self.brand, mailbox=self.mailbox,
+                customer_email=f"zed{i}@match.com", subject=f"matchme subject {i}")
+        self.assertLessEqual(len(self._sugg("match")), 10)
+
+    def test_prefix_ranked_first(self):
+        # "Hari Mohan" starts with the query; a subject that merely contains it must rank lower.
+        Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="x@x.com", subject="call hari back")
+        vals = [s["value"] for s in self._sugg("hari")]
+        self.assertLess(vals.index("Hari Mohan"), vals.index("call hari back"))
+
+    def test_org_scoped(self):
+        from apps.organizations.models import Brand, Organization
+        other = Organization.objects.create(name="Other")
+        b2 = Brand.objects.create(organization=other, name="Other.in")
+        Ticket.objects.create(organization=other, brand=b2, customer_email="secret@other.com",
+                              subject="secret", extracted={"customer_name": "Secret Person"})
+        v = self._vals("secret")
+        self.assertNotIn("Secret Person", v)          # not a member of Other org
+        self.assertNotIn("secret@other.com", v)

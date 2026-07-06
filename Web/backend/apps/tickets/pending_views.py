@@ -40,4 +40,13 @@ class PendingConversationViewSet(viewsets.ReadOnlyModelViewSet):
             # The Pending tab shows ACTIVE held conversations -- a CLOSED pending (a finished
             # inquiry / promoted ticket) is not "waiting" for anything, so hide it by default.
             qs = qs.exclude(status="closed")
+        # Date-range filter (Inbox 'Range' dropdown) -- SAME helper the ticket list uses, so a
+        # held conversation is filtered by received/created date identically to a ticket. Additive:
+        # off unless a range/since/until param is passed, so the default listing is unchanged.
+        from apps.tickets.views import _range_window
+        since, until = _range_window(params)
+        if since:
+            qs = qs.filter(created_at__date__gte=since)
+        if until:
+            qs = qs.filter(created_at__date__lte=until)
         return qs

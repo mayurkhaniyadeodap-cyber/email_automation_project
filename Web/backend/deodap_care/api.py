@@ -44,6 +44,7 @@ from apps.tickets.views import (
     attachment_file,
 )
 from apps.tickets.pending_views import PendingConversationViewSet
+from apps.tickets.search_views import search_suggest
 
 router = routers.DefaultRouter()
 router.register("organizations", OrganizationViewSet, basename="organization")
@@ -213,6 +214,7 @@ urlpatterns = [
     path("gmail/callback/", gmail_callback, name="gmail-callback"),
     path("gmail/fetch/", gmail_fetch, name="gmail-fetch"),
     path("attachments/<int:pk>/", attachment_file, name="attachment-file"),
+    path("search/suggest/", search_suggest, name="search-suggest"),   # global autocomplete
     path("analytics/overview/", analytics_views.overview, name="analytics-overview"),
     path("analytics/volume/", analytics_views.volume, name="analytics-volume"),
     path("analytics/sla/", analytics_views.sla, name="analytics-sla"),
