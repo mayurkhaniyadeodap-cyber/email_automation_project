@@ -92,7 +92,11 @@ class ConfirmationTests(BaseFixture):
         out = t.messages.filter(direction=Message.DIRECTION_OUTBOUND,
                                 subject="Support Ticket Created Successfully").first()
         self.assertIsNotNone(out)
-        self.assertIn(t.ticket_id, out.body_text)
+        # This unverified ticket has NO Care Panel number (store-json is phone-keyed) -> the internal
+        # TKT-... id is NOT shown to the customer; the acknowledgment body still goes out (the
+        # tracking link is included only when PUBLIC_BASE_URL points at this app's portal host).
+        self.assertNotIn(t.ticket_id, out.body_text)
+        self.assertTrue(out.body_text.strip())
         self.assertTrue(t.audit_log.filter(event="ticket_created").exists())
         self.assertTrue(t.audit_log.filter(event="confirmation_sent").exists())
 
@@ -557,3 +561,35 @@ class PhoneNotRequiredTests(BaseFixture):
                                 subject="Support Ticket Created Successfully").last()
         self.assertIsNotNone(out)                                   # confirmation still sent (M5N)
         self.assertNotIn("care.deodap.in/t?id=", out.body_text)    # no broken link in the email
+
+
+class ConfirmationTicketIdSuppressionTests(BaseFixture):
+    """An escalated / unverified ticket has NO Care Panel number (store-json is phone-keyed and
+    was skipped). The confirmation must NOT show the internal TKT-... id, but MUST keep the
+    acknowledgment + tracking link. A ticket WITH a real Care Panel number still shows it."""
+
+    def _ticket(self, **extra):
+        return Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="c@x.com", subject="full wrong parcel",
+            issue_summary="full wrong parcel", sub_topic="Wrong Item",
+            category="3. Delivery Issues (Post-Delivery)", **extra)
+
+    def test_no_care_number_hides_internal_ticket_id(self):
+        t = self._ticket(status=Ticket.STATUS_ESCALATED)      # no phone/order -> no Care Panel number
+        service.send_confirmation(t, "created")
+        t.refresh_from_db()
+        out = t.messages.filter(direction=Message.DIRECTION_OUTBOUND).order_by("-id").first()
+        self.assertIsNotNone(out)
+        self.assertNotIn(t.ticket_id, out.body_text)          # internal TKT-... never shown
+        self.assertNotIn("TKT-", out.body_text)
+        self.assertNotIn("Ticket ID", out.body_text)          # the whole ID line is dropped
+        self.assertTrue(out.body_text.strip())                # ack body still present
+
+    def test_real_care_number_is_shown(self):
+        t = self._ticket(ticket_number="2607020877")          # real Care Panel number present
+        service.send_confirmation(t, "created")
+        out = t.messages.filter(direction=Message.DIRECTION_OUTBOUND).order_by("-id").first()
+        self.assertIsNotNone(out)
+        self.assertIn("2607020877", out.body_text)            # shown as the ticket number
+        self.assertIn("Ticket ID", out.body_text)

@@ -405,11 +405,20 @@ class PortalReplyRedirectTests(TestCase):
         self.assertEqual(resp["Location"], reverse("tracking-page") + "?id=hash123&sent=1")
         self.assertEqual(Message.objects.count(), before + 1)        # reply saved (logic unchanged)
 
-    @override_settings(FORCE_SCRIPT_NAME="/email_automation")
     def test_redirect_includes_subpath_prefix(self):
-        resp = self.client.post("/t", {"id": "hash123", "comment": "hi"})
+        # Under the sub-path deploy (FORCE_SCRIPT_NAME=/email_automation) Django sets a script
+        # prefix; the fix builds the redirect with reverse(), so it inherits that prefix instead of
+        # the OLD hardcoded '/t?...' that 404'd. Exercise the builder under an explicit prefix
+        # (deterministic across Python/Django test-client versions).
+        from django.urls import get_script_prefix, set_script_prefix
+        from apps.tickets.tracking import _portal_redirect
+        old = get_script_prefix()
+        set_script_prefix("/email_automation/")
+        try:
+            resp = _portal_redirect("hash123", sent=True)
+        finally:
+            set_script_prefix(old)
         self.assertEqual(resp.status_code, 302)
-        # reverse() prepends the sub-path -> the OLD hardcoded '/t?...' (which 404'd) is gone.
         self.assertTrue(resp["Location"].startswith("/email_automation/t?id=hash123"),
                         resp["Location"])
         self.assertIn("sent=1", resp["Location"])

@@ -576,3 +576,142 @@ class VerifiedEvidenceTemplateTests(TestCase):
         out = self._request(self._pending(sub_topic="Quality Issue", category="7. Refund",
                                           body="bad quality item"))
         self.assertNotIn("(without cuts)", out["body"])                            # not an EV_* body
+
+
+class ShipmentTrackingClassificationTests(TestCase):
+    """Whole-parcel non-delivery / tracking phrases ('parcel not received', 'delayed', 'where is
+    my order') must be SHIPMENT TRACKING -- never Missing Product (evidence). Only a parcel that
+    was DELIVERED with a specific item missing is Missing Product. (The reported bug: '... have
+    not received the parcel yet' was wrongly asked for Missing-Product evidence.)"""
+
+    SHIPMENT = [
+        "262255847 have not received the parcel yet",
+        "Order not received",
+        "Parcel not received",
+        "My order is delayed",
+        "Tracking shows delayed",
+        "where is my order",
+        "parcel not delivered yet",
+        "still waiting for my order",
+        "my shipment is in transit",
+        "I have not received my order",
+    ]
+    MISSING = [
+        "Package delivered but one item missing",
+        "Received parcel but missing item",
+        "one item is missing from the box",
+        "item not received in my order",
+    ]
+
+    def test_shipment_phrases_are_tracking_not_missing(self):
+        for t in self.SHIPMENT:
+            with self.subTest(text=t):
+                self.assertTrue(evidence.is_shipment_tracking(t), t)
+                self.assertIsNone(evidence.delivered_evidence_case(t), t)       # no EV_* template
+                self.assertIsNone(evidence.delivered_item_subtype(t), t)        # not delivered-item
+                self.assertEqual(evidence.evidence_level(text=t), evidence.EV_NONE, t)
+
+    def test_delivered_with_item_missing_is_missing_product(self):
+        for t in self.MISSING:
+            with self.subTest(text=t):
+                self.assertFalse(evidence.is_shipment_tracking(t), t)
+                self.assertEqual(evidence.delivered_evidence_case(t), evidence.EV_CASE_MISSING, t)
+
+    def test_item_condition_beats_tracking_words(self):
+        # A damaged/wrong/defective item that also mentions delay/tracking stays an evidence case.
+        self.assertFalse(evidence.is_shipment_tracking("my item arrived damaged, delivery delayed"))
+        self.assertEqual(
+            evidence.delivered_evidence_case("damaged item, tracking shows delivered"),
+            evidence.EV_CASE_DAMAGED)
+        self.assertEqual(evidence.delivered_item_subtype("wrong item, still waiting"), "Wrong Item")
+
+
+class ProgressiveEvidenceItemTests(TestCase):
+    """The per-case evidence ITEM vocabulary drives progressive collection: only the still-missing
+    file kind is listed, never a file already received."""
+
+    def test_missing_items_by_case(self):
+        # Missing Item needs video + POS photo. Video received -> only the POS photo is missing.
+        self.assertEqual(
+            evidence.delivered_missing_items(evidence.EV_CASE_MISSING, has_photo=False, has_video=True),
+            ["Image of the POS paper"])
+        # Both received -> nothing missing (ready for a ticket).
+        self.assertEqual(
+            evidence.delivered_missing_items(evidence.EV_CASE_MISSING, has_photo=True, has_video=True), [])
+        # Photo received, video still missing.
+        self.assertEqual(
+            evidence.delivered_missing_items(evidence.EV_CASE_MISSING, has_photo=True, has_video=False),
+            ["Unboxing video (without cuts)"])
+
+    def test_non_working_is_video_only(self):
+        # A photo does NOT satisfy the mandatory video for a non-working product.
+        self.assertEqual(
+            evidence.delivered_missing_items(evidence.EV_CASE_NON_WORKING, has_photo=True, has_video=False),
+            ["A clear video showing that the product is not working"])
+        self.assertEqual(
+            evidence.delivered_missing_items(evidence.EV_CASE_NON_WORKING, has_photo=False, has_video=True), [])
+
+    def test_all_evidence_cases_have_item_labels(self):
+        for case, rule in evidence.DELIVERED_EVIDENCE_RULES.items():
+            items = evidence.DELIVERED_EVIDENCE_ITEMS.get(case, {})
+            if rule["video"]:
+                self.assertTrue(items.get("video"), case)
+            if rule["photo"]:
+                self.assertTrue(items.get("photo"), case)
+
+
+class ProgressiveEvidenceRequestTests(TestCase):
+    """_send_progressive_evidence_request acknowledges received evidence and asks ONLY for what is
+    still missing -- never the full EV_* template, never a file already received."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="DeoDap")
+        self.brand = Brand.objects.create(organization=self.org, name="DeoDap.in")
+        self.mailbox = Mailbox.objects.create(brand=self.brand, email_address="care@deodap.com")
+
+    def _pending(self, *, sub_topic, body="", has_photo=False, has_video=False):
+        return PendingConversation.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="b@x.com", subject=sub_topic, sub_topic=sub_topic,
+            category="3. Delivery Issues", body_text=body or sub_topic,
+            issue_summary=body or sub_topic, original_message_id="<a@x>", language="en",
+            has_photo=has_photo, has_video=has_video, status="waiting_for_video")
+
+    def _send(self, pending, case):
+        sent = []
+        orig = service._send_customer_email
+        service._send_customer_email = lambda to, subject, body, **k: (
+            sent.append({"subject": subject, "body": body}) or "<s>")
+        try:
+            done = service._send_progressive_evidence_request(
+                self.mailbox, {"subject": "", "body_text": ""}, pending, case)
+        finally:
+            service._send_customer_email = orig
+        return done, (sent[-1] if sent else None)
+
+    def test_video_received_asks_only_pos_photo(self):
+        # Exactly the reported example: Missing Item, customer sent only the unboxing video.
+        p = self._pending(sub_topic="Missing Item", body="an item is missing from the box",
+                          has_video=True)
+        done, out = self._send(p, evidence.EV_CASE_MISSING)
+        self.assertTrue(done)
+        self.assertIn("Thank you for sending", out["body"])            # acknowledges the video
+        self.assertIn("remaining required evidence", out["body"])
+        self.assertIn("• Image of the POS paper", out["body"])         # ONLY the missing item
+        self.assertNotIn("• Unboxing video", out["body"])              # video NOT re-asked
+        self.assertNotIn("We are sorry to hear", out["body"])          # NOT the full EV_* template
+
+    def test_photo_received_asks_only_video(self):
+        p = self._pending(sub_topic="Damaged Item", body="my product is damaged", has_photo=True)
+        done, out = self._send(p, evidence.EV_CASE_DAMAGED)
+        self.assertTrue(done)
+        self.assertIn("• Unboxing video (without cuts)", out["body"])   # only the video is missing
+        self.assertNotIn("• Clear images of the damaged product", out["body"])  # photo not re-asked
+
+    def test_complete_returns_false_and_sends_nothing(self):
+        # All mandatory files present -> no request; caller promotes to a ticket.
+        p = self._pending(sub_topic="Missing Item", body="item missing from box",
+                          has_photo=True, has_video=True)
+        done, out = self._send(p, evidence.EV_CASE_MISSING)
+        self.assertFalse(done)
+        self.assertIsNone(out)

@@ -595,3 +595,52 @@ class PaymentNoOrderClassificationTests(BaseFixture):
     def test_genuine_delivery_not_misrouted_to_payment(self):
         r = self._classify("where is my order, not received yet")
         self.assertNotEqual((r.category_ref and r.category_ref.code), "8")
+
+
+class ShipmentTrackingOverrideTests(BaseFixture):
+    """A whole-parcel NON-DELIVERY / 'where is my order' / delayed email MUST force Category 1
+    (Shipment & Delivery Tracking) -- never Missing Item / the Missing-Product evidence flow (the
+    reported bug: '... have not received the parcel yet' was asked for evidence)."""
+
+    def setUp(self):
+        super().setUp()
+        self.cat1 = Category.objects.create(
+            brand=self.brand, code="1", name="Shipment & Delivery Tracking")
+
+    def _classify(self, body, ai=None):
+        # Default: the AI MISCLASSIFIES as a Missing Item -> the override must win.
+        ai = ai or {"category": "3. Delivery Issues (Post-Delivery)",
+                    "sub_topic": "3.11 Missing Item", "confidence": 0.9}
+        return classifier.classify(
+            self.brand,
+            {"subject": "help", "body_text": body, "from_email": "buyer@example.com"},
+            provider=FakeProvider(ai))
+
+    def test_parcel_not_received_forces_shipment_tracking(self):
+        for body in ("262255847 have not received the parcel yet",
+                     "Order not received", "Parcel not received", "My order is delayed",
+                     "still waiting for my parcel", "where is my order"):
+            with self.subTest(body=body):
+                r = self._classify(body)
+                self.assertEqual(r.category_ref, self.cat1, body)
+                self.assertIn("1.", r.category)
+                self.assertNotIn("Missing", r.sub_topic or "")
+                self.assertFalse(r.requires_evidence)
+
+    def test_delivered_with_item_missing_stays_missing(self):
+        for body in ("Package delivered but one item missing",
+                     "Received parcel but missing item"):
+            with self.subTest(body=body):
+                r = self._classify(body)
+                self.assertNotEqual((r.category_ref and r.category_ref.code), "1", body)
+
+    def test_damaged_item_not_remapped_even_with_delay(self):
+        r = self._classify("my item arrived damaged and delivery delayed",
+                            ai={"category": "3. Delivery Issues", "sub_topic": "Damaged Item",
+                                "confidence": 0.9})
+        self.assertNotEqual((r.category_ref and r.category_ref.code), "1")
+
+    def test_override_logs_emitted(self):
+        with self.assertLogs("apps.classifier.service", level="INFO") as cm:
+            self._classify("parcel not received yet")
+        self.assertIn("CLASSIFICATION-REASON=non-delivery", "\n".join(cm.output))

@@ -100,6 +100,72 @@ def is_delivered_not_received(text):
             and any(k in low for k in NOT_RECEIVED_KEYWORDS))
 
 
+# Item-specific "an item is missing / not received": a SPECIFIC item is absent from a parcel the
+# customer DID receive -> Missing Product (evidence). Distinct from the WHOLE parcel never arriving
+# (that is Shipment Tracking). Item-specific phrasing ("one item missing", "item not received in my
+# order", "missing from the box") implies the rest of the order arrived.
+ITEM_MISSING_KEYWORDS = (
+    "item missing", "items missing", "missing item", "missing items", "product missing",
+    "missing product", "products missing", "one item missing", "an item is missing",
+    "item is missing", "piece missing", "missing piece", "missing pieces",
+    "item not received", "items not received", "product not received", "products not received",
+    "one item not received", "missing from the box", "missing from the package",
+    "missing from the parcel", "missing from my order", "not in the box", "not in the parcel",
+    "not in the package",
+)
+
+
+def delivered_missing_item(text):
+    """True when a SPECIFIC item is missing from a parcel the customer received -> a genuine
+    Missing-Product evidence case. Item-specific phrasing ('one item missing', 'item not received
+    in my order', 'missing from the box') implies the parcel DID arrive -- unlike a whole-parcel
+    'not received', which is a Shipment-Tracking / non-delivery concern."""
+    low = (text or "").lower()
+    return any(k in low for k in ITEM_MISSING_KEYWORDS)
+
+
+# Shipment-tracking / non-delivery: the WHOLE parcel/order has not arrived, is delayed, is in
+# transit, or the customer is asking WHERE it is. -> Shipment Tracking (look up the live status);
+# NEVER a delivered-item evidence request (you cannot film an unboxing of a parcel that never
+# arrived). Unambiguous tracking phrases:
+SHIPMENT_TRACKING_KEYWORDS = (
+    "where is my order", "where is my parcel", "where is my package", "where is my shipment",
+    "where's my order", "where's my parcel", "where's my package", "track my order",
+    "track my parcel", "track my package", "tracking", "in transit", "still waiting",
+    "still not delivered", "still not received", "not yet delivered", "yet to be delivered",
+    "shipment delayed", "delivery delayed", "order is delayed", "parcel is delayed",
+    "delivery is delayed", "delayed delivery", "delayed shipment", "delivery delay",
+    "shipment delay", "out for delivery", "when will i receive", "when will it arrive",
+    "when will i get",
+)
+# Whole-parcel non-delivery verbs. These are Shipment Tracking UNLESS the phrasing is ITEM-specific
+# (delivered_missing_item) or an item-condition is described (ITEM_CONDITION_KEYWORDS).
+_NON_DELIVERY_KEYWORDS = (
+    "not received", "haven't received", "have not received", "havent received", "didn't receive",
+    "did not receive", "didnt receive", "never received", "not delivered", "hasn't been delivered",
+    "has not been delivered", "not delivered to me", "not arrived", "hasn't arrived",
+    "has not arrived", "didn't arrive", "did not arrive", "no parcel", "no package",
+    "yet to receive", "order not received", "parcel not received", "package not received",
+    "order not delivered", "parcel not delivered",
+)
+
+
+def is_shipment_tracking(text):
+    """True when the email is a SHIPMENT-TRACKING / non-delivery concern -- the whole parcel/order
+    hasn't arrived / is delayed / in transit, or the customer is asking where it is.
+
+    Shipment tracking takes PRIORITY over Missing Product, EXCEPT when the customer clearly says the
+    parcel WAS delivered/received and a specific item inside is missing (delivered_missing_item), or
+    describes a damaged / wrong / defective item (ITEM_CONDITION_KEYWORDS -> the parcel WAS received).
+    Those remain delivered-item evidence cases."""
+    low = (text or "").lower()
+    if delivered_missing_item(low) or any(k in low for k in ITEM_CONDITION_KEYWORDS):
+        return False
+    if any(k in low for k in SHIPMENT_TRACKING_KEYWORDS):
+        return True
+    return any(k in low for k in _NON_DELIVERY_KEYWORDS)
+
+
 # Deterministic Delivered-Item sub-type, by keyword. ORDER MATTERS: "Damaged" is checked
 # FIRST so "my order is damage" can never fall through to "Missing Item". Each tuple is
 # (sub-type name, keywords). Mirrors the business rules.
@@ -114,8 +180,9 @@ DELIVERED_ITEM_SUBTYPES = (
                         "short quantity", "less pieces", "fewer items")),
     ("Quality Issue", ("quality issue", "bad quality", "poor quality", "low quality",
                        "inferior quality")),
-    ("Missing Item", ("missing", "item not received", "not received", "didn't receive",
-                      "did not receive")),
+    # Bare "not received" (whole parcel) is NON-DELIVERY / Shipment Tracking, not Missing -- only
+    # an item-specific "missing" / "item not received" reaches here (is_shipment_tracking gates it).
+    ("Missing Item", ("missing", "item not received", "product not received")),
 )
 
 
@@ -124,9 +191,10 @@ def delivered_item_subtype(text):
     / 'Wrong Item' / 'Quantity Issue' / 'Missing Item'), or None if no keyword matches.
     Deterministic and order-sensitive -- 'damage' resolves to 'Damaged Item', NEVER
     'Missing Item'."""
-    # "Delivered but not received" is a NON-DELIVERY dispute, not a delivered-item sub-type
-    # (no parcel arrived to inspect) -- never mislabel it 'Missing Item'.
-    if is_delivered_not_received(text):
+    # A whole-parcel non-delivery / shipment-tracking concern ("parcel not received", "delayed",
+    # "where is my order") is NOT a delivered-item sub-type -- no parcel arrived to inspect. This
+    # subsumes "delivered but not received" and beats the Missing-Item keyword (the reported bug).
+    if is_shipment_tracking(text) or is_delivered_not_received(text):
         return None
     low = (text or "").lower()
     for subtype, keywords in DELIVERED_ITEM_SUBTYPES:
@@ -165,8 +233,9 @@ _DELIVERED_EVIDENCE_CASES = (
     (EV_CASE_WRONG_PRODUCT, ("wrong item", "wrong product", "different product", "different item",
                              "incorrect item", "incorrect product", "received wrong",
                              "wrong article")),
-    (EV_CASE_MISSING, ("missing", "item not received", "product not received", "not received",
-                       "didn't receive", "did not receive")),
+    # Item-specific missing only. Bare "not received" (whole parcel) is Shipment Tracking, gated
+    # out by is_shipment_tracking in delivered_evidence_case before this table is consulted.
+    (EV_CASE_MISSING, ("missing", "item not received", "product not received")),
 )
 
 # Per case: mandatory FILE evidence (checked via has_photo / has_video) + the mail template id.
@@ -181,14 +250,57 @@ DELIVERED_EVIDENCE_RULES = {
     EV_CASE_DEFECTIVE:     {"photo": True,  "video": True,  "mail": "EV_DEFECTIVE"},
 }
 
+# Human-readable evidence ITEM labels per case, split by the file kind (photo / video) that
+# satisfies each. Used by PROGRESSIVE evidence collection to name exactly which item is still
+# missing -- never re-listing what was already received. Wording mirrors the EV_* templates.
+DELIVERED_EVIDENCE_ITEMS = {
+    EV_CASE_DAMAGED:       {"video": "Unboxing video (without cuts)",
+                            "photo": "Clear images of the damaged product"},
+    EV_CASE_NON_WORKING:   {"video": "A clear video showing that the product is not working"},
+    EV_CASE_MISSING:       {"video": "Unboxing video (without cuts)",
+                            "photo": "Image of the POS paper"},
+    EV_CASE_WRONG_PRODUCT: {"video": "Unboxing video (without cuts)",
+                            "photo": "Clear images of the wrong product received"},
+    EV_CASE_WRONG_PARCEL:  {"photo": "Clear images of all products received and the shipping "
+                                     "label / POS paper on the package"},
+    EV_CASE_DEFECTIVE:     {"video": "A video clearly demonstrating the defect",
+                            "photo": "Clear images showing the defect"},
+}
+
+
+def delivered_missing_items(case, *, has_photo, has_video):
+    """Item labels still MISSING for `case`, given what has been received so far. An item is listed
+    ONLY when its file kind is required by the case AND not yet received -> we never ask again for
+    evidence already sent. Empty list == every mandatory file present (ready to create the ticket)."""
+    rule = DELIVERED_EVIDENCE_RULES.get(case, {})
+    items = DELIVERED_EVIDENCE_ITEMS.get(case, {})
+    missing = []
+    if rule.get("video") and not has_video and items.get("video"):
+        missing.append(items["video"])
+    if rule.get("photo") and not has_photo and items.get("photo"):
+        missing.append(items["photo"])
+    return missing
+
+
+def delivered_received_items(case, *, has_photo, has_video):
+    """Item labels already RECEIVED for `case` (for the 'Thank you for sending ...' acknowledgment)."""
+    items = DELIVERED_EVIDENCE_ITEMS.get(case, {})
+    got = []
+    if has_video and items.get("video"):
+        got.append(items["video"])
+    if has_photo and items.get("photo"):
+        got.append(items["photo"])
+    return got
+
 
 def delivered_evidence_case(text):
     """Return the Delivered-Item evidence CASE (one of EV_CASE_*) for `text`, or None.
 
     Evidence-only: it selects the exact evidence-request wording + the mandatory files. Deferred
-    to is_delivered_not_received (a whole parcel never arrived -> no unboxing evidence possible).
-    Does NOT change classification or the Care Panel issue mapping."""
-    if is_delivered_not_received(text):
+    to is_shipment_tracking (a whole parcel never arrived / is delayed / in transit -> no unboxing
+    evidence is possible; that is a Shipment-Tracking concern). Does NOT change classification or
+    the Care Panel issue mapping."""
+    if is_shipment_tracking(text) or is_delivered_not_received(text):
         return None
     low = (text or "").lower()
     for case, keywords in _DELIVERED_EVIDENCE_CASES:
@@ -256,6 +368,14 @@ def evidence_level(*, category="", sub_topic="", issue_summary="", text="",
     #     DELIVERED status. An unboxing video is impossible -> NEVER require evidence. This
     #     beats the "not received" -> Missing-Item video keyword (item missing FROM a parcel).
     if is_delivered_not_received(combined):
+        return EV_NONE
+
+    # 0b2) Whole-parcel non-delivery / shipment tracking ("parcel not received", "delayed", "in
+    #      transit", "where is my order"). Judge on the customer's OWN words (text) -- NOT the AI
+    #      category/sub_topic label -- so a wrong "Missing Item" label can't force the Missing-
+    #      Product evidence flow (the reported bug). Never fires for a delivered-item evidence case
+    #      (is_shipment_tracking defers to delivered_missing_item / item-condition keywords).
+    if text and is_shipment_tracking(text):
         return EV_NONE
 
     # 0c) Payment deducted but order NOT placed -> a PAYMENT SCREENSHOT (photo). NEVER a video

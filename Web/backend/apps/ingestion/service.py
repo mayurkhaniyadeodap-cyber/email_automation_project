@@ -532,6 +532,58 @@ def _send_delivered_evidence_request(mailbox, message, pending, case):
                 "status=%s", pending.id, case, rule["photo"], rule["video"], pending.status)
 
 
+def _join_items(items):
+    """Natural-language join for evidence item labels: 'the X' / 'the X and the Y'."""
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _send_progressive_evidence_request(mailbox, message, pending, case):
+    """PROGRESSIVE evidence collection: acknowledge the evidence received so far and ask ONLY for the
+    item(s) still missing -- NEVER re-send the full original EV_* template, and never re-request a
+    file already received. Keeps the conversation held until every mandatory file arrives.
+
+    Returns True when a 'still-missing' request was sent; False when nothing is missing (the caller
+    then promotes the pending to a ticket immediately)."""
+    missing = evidence.delivered_missing_items(
+        case, has_photo=pending.has_photo, has_video=pending.has_video)
+    if not missing:
+        return False                                    # complete -> caller creates the ticket
+    received = evidence.delivered_received_items(
+        case, has_photo=pending.has_photo, has_video=pending.has_video)
+    lines = []
+    if received:
+        lines.append(f"Thank you for sending the {_join_items(received)}.")
+        lines.append("")
+    lines.append("Please send the remaining required evidence:")
+    lines.append("")
+    lines.extend(f"• {item}" for item in missing)
+    code = mails.normalize_lang(pending.language)
+    body = "\n".join(lines) + f"\n\n{mails.SIGN[code]}"
+    subject = _auto_reply_subject(pending)
+    refs = list(pending.references or [])
+    if pending.original_message_id and pending.original_message_id not in refs:
+        refs.append(pending.original_message_id)
+    sent_id = _send_customer_email(
+        pending.customer_email, subject, body,
+        in_reply_to=pending.original_message_id, references=refs)
+    pending.evidence_requests = (pending.evidence_requests or 0) + 1
+    # Still waiting: a video-mandatory case with no video yet stays 'waiting_for_video'.
+    rule = evidence.DELIVERED_EVIDENCE_RULES[case]
+    pending.status = ("waiting_for_video" if rule["video"] and not pending.has_video
+                      else "awaiting_evidence")
+    if sent_id:
+        pending.last_message_id = sent_id
+    pending.save(update_fields=["evidence_requests", "status", "last_message_id", "updated_at"])
+    logger.info("PROGRESSIVE-EVIDENCE pending=%s case=%s received=%s missing=%s status=%s",
+                pending.id, case, received, missing, pending.status)
+    return True
+
+
 def _result_requires_video(result):
     """A VIDEO is mandatory (photo insufficient) -- Defective / Missing / Wrong Item."""
     return evidence.requires_video(_result_evidence_level(result))
@@ -2184,7 +2236,14 @@ def _request_pending_evidence(mailbox, message, pending):
     per-concern templates were ignored for conversations that verified first.)"""
     case = _pending_delivered_case(pending)
     if case is not None:
-        _send_delivered_evidence_request(mailbox, message, pending, case)
+        # The customer may have attached evidence WITH the verifying reply (already accumulated).
+        if _pending_meets_case(pending, case):
+            ticket = _promote_pending(mailbox, pending, message)   # complete -> create the ticket now
+            return ticket, ticket.messages.order_by("created_at").last(), True
+        if pending.has_photo or pending.has_video:
+            _send_progressive_evidence_request(mailbox, message, pending, case)  # ask only the rest
+        else:
+            _send_delivered_evidence_request(mailbox, message, pending, case)    # first full request
         return None, None, True
     level = _pending_evidence_level(pending)
     if level == evidence.EV_VIDEO and not pending.has_video:
@@ -3916,8 +3975,12 @@ def handle_incoming_email(mailbox, message):
         delivered_case = _pending_delivered_case(pending) if level != evidence.EV_NONE else None
         if delivered_case is not None:
             if not _pending_meets_case(pending, delivered_case):
-                _send_delivered_evidence_request(mailbox, message, pending, delivered_case)
+                # PROGRESSIVE: acknowledge what just arrived and ask ONLY for the item(s) still
+                # missing -- never re-send the full EV_* template, never re-ask for evidence already
+                # received. Holds the conversation until every mandatory file is present.
+                _send_progressive_evidence_request(mailbox, message, pending, delivered_case)
                 return None, None, True
+            # All mandatory files received -> fall through and create the ticket immediately.
         # Category-first evidence gate: VIDEO-mandatory needs a video (photo-only is not
         # enough); PHOTO categories accept a photo (or video); NONE needs no media.
         elif level == evidence.EV_VIDEO and not pending.has_video:
@@ -4084,7 +4147,12 @@ def handle_incoming_email(mailbox, message):
                 # Record any PARTIAL evidence already on this first email (e.g. a photo when both
                 # photo+video are required) so we never re-ask for what the customer already sent.
                 _accumulate_pending(pending, message)
-                _send_delivered_evidence_request(mailbox, message, pending, delivered_case)
+                if pending.has_photo or pending.has_video:
+                    # First email already carries SOME evidence -> acknowledge it and ask only for
+                    # the rest (progressive), rather than the full request listing every item.
+                    _send_progressive_evidence_request(mailbox, message, pending, delivered_case)
+                else:
+                    _send_delivered_evidence_request(mailbox, message, pending, delivered_case)
                 return None, None, True
             # First email already has all mandatory files -> fall through to create the ticket.
         elif level == evidence.EV_VIDEO and not _message_has_video(message):
@@ -4440,6 +4508,21 @@ def _has_evidence(ticket):
     return has_photo or has_video
 
 
+def _suppress_internal_ref(body, ref):
+    """Remove the 'Ticket ID: <ref>' paragraph from a rendered confirmation body. Used when there
+    is NO real Care Panel number (e.g. an escalated / unverified ticket whose store-json was skipped
+    for lack of a phone): we keep the acknowledgment + the tracking link but never show the internal
+    TKT-... id to the customer. Language-agnostic -- it drops the whole line carrying `ref`, so it
+    works across the en / hi / gu label variants ('Ticket ID:' / 'टिकट आईडी:' / 'ટિકિટ આઈડી:')."""
+    if not ref:
+        return body
+    kept = [ln for ln in body.split("\n") if ref not in ln]
+    text = "\n".join(kept)
+    while "\n\n\n" in text:                 # collapse the blank gap left where the line was
+        text = text.replace("\n\n\n", "\n\n")
+    return text
+
+
 def send_confirmation(ticket, kind):
     """Email the customer a ticket created / updated confirmation (Smart Ticket mgmt)."""
     from django.conf import settings
@@ -4521,6 +4604,11 @@ def send_confirmation(ticket, kind):
     # Panel hash (https://care.deodap.in/t?id=<hash>); otherwise the no-link variant
     # (M5N/M6N) and log why. We never emit an internal/localhost link here.
     number = ticket.ticket_number or ticket.ticket_id
+    # A REAL Care Panel number (numeric, from store-json) differs from the internal TKT-... id.
+    # When store-json was skipped/failed (e.g. an escalated, unverified ticket with no phone) the
+    # number is just the internal id fallback -> we must NOT show it to the customer as a ticket
+    # number. We keep the acknowledgment + tracking link but drop the "Ticket ID:" line below.
+    has_real_number = bool(ticket.ticket_number) and ticket.ticket_number != ticket.ticket_id
     # Customer-facing View-Ticket link -> OUR /t portal (which shows the full Conversation and
     # resolves ANY hash); fall back to the external Care Panel link only if our portal base is
     # unset. This is why the M5 email now points at care.deodap.info/email_automation/t.
@@ -4558,6 +4646,13 @@ def send_confirmation(ticket, kind):
                     ticket.ticket_id, kind, reason)
         logger.info("EMAIL_CONTEXT=%s", {"ticket": ticket.ticket_id, "kind": kind,
                     "mail": mail_id, "subject": subject, "has_link": False, "reason": reason})
+
+    # No real Care Panel number -> never expose the internal TKT-... id: drop the "Ticket ID:" line
+    # (all languages) but keep the acknowledgment + tracking link, per the required behavior.
+    if not has_real_number:
+        body = _suppress_internal_ref(body, number)
+        logger.info("CONFIRMATION-ID-SUPPRESSED ticket=%s (no Care Panel number -- internal id "
+                    "hidden from the customer).", ticket.ticket_id)
 
     message = Message.objects.create(
         ticket=ticket, direction=Message.DIRECTION_OUTBOUND,

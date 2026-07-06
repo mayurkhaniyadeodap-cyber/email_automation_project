@@ -402,6 +402,66 @@ def _correct_payment_category(brand, message, result):
     return result, True
 
 
+def _correct_shipment_tracking_category(brand, message, result):
+    """Force Category 1 (Shipment & Delivery Tracking) for a whole-parcel NON-DELIVERY / 'where is
+    my order' / delayed / in-transit email, so the AI (or rule) can never file 'parcel not received'
+    under Delivery-Issues / Missing Item -> the Missing-Product evidence flow (the reported bug:
+    "... have not received the parcel yet" wrongly asked for evidence).
+
+    Skips when the customer clearly says the parcel WAS delivered with a specific item missing, or
+    describes a damaged / wrong / defective item -- those are genuine delivered-item evidence cases
+    (evidence.is_shipment_tracking already defers to them). Cancellation keeps its own priority.
+    Returns (result, fired)."""
+    from apps.ingestion import evidence
+    from apps.taxonomy.models import Category, SubTopic
+
+    if result is None:
+        return result, False
+    blob = (f"{message.get('subject','') or ''} "
+            f"{message.get('body_text') or message.get('snippet') or ''}")
+    if evidence.is_cancellation(blob) or not evidence.is_shipment_tracking(blob):
+        return result, False
+
+    # Only CORRECT emails the classifier dropped into a DELIVERED-ITEM / Missing bucket -- that is
+    # where the reported bug routes 'parcel not received'. Tracking / refund / other categories are
+    # already handled correctly; never reroute them (e.g. a plain 'where is my order' must keep its
+    # existing handling and not be forced into the tracking-pending flow).
+    cat_code = (getattr(result.category_ref, "code", "")
+                or (result.category or "").split(".")[0]).strip()
+    raw_sub = result.sub_topic or ""
+    in_delivered_bucket = (cat_code in ("3", "7") or bool(result.requires_evidence)
+                           or any(s in raw_sub for s in
+                                  ("Missing", "Damaged", "Defective", "Wrong", "Quantity")))
+    if not in_delivered_bucket:
+        return result, False
+
+    was_topic, was_sub = result.category or "-", result.sub_topic or "-"
+    sub_name = "Order Not Received"
+    cat = (result.category_ref if (result.category_ref and result.category_ref.code == "1")
+           else Category.objects.filter(brand=brand, code="1").first())
+    if cat is not None:
+        result.category_ref = cat
+        result.category = f"{cat.code}. {cat.name}"
+        sub = (SubTopic.objects.filter(category=cat, name__iexact=sub_name).first()
+               or SubTopic.objects.filter(category=cat, name__icontains="not received").first()
+               or SubTopic.objects.filter(category=cat, name__icontains="tracking").first())
+        if sub is not None:
+            result.sub_topic_ref = sub
+            result.sub_topic = f"{sub.code} {sub.name}"
+        else:                                   # cat 1 has no matching seeded sub-topic
+            result.sub_topic_ref = None
+            result.sub_topic = sub_name
+    else:                                       # no cat-1 in taxonomy -> still stamp the labels
+        result.category = "1. Shipment & Delivery Tracking"
+        result.sub_topic = sub_name
+    result.requires_evidence = False            # a parcel that never arrived is never an evidence case
+    logger.info("CLASSIFICATION-TOPIC=%s", result.category)
+    logger.info("CLASSIFICATION-SUBTOPIC=%s", result.sub_topic)
+    logger.info("CLASSIFICATION-REASON=non-delivery/shipment-tracking override (was topic=%r sub=%r)",
+                was_topic, was_sub)
+    return result, True
+
+
 def _post_correct(brand, message, result):
     """Deterministic post-classification fixes (in priority order). Payment-deducted/no-order
     wins first (never a delivery/item case), then Website/App, then Offers, else the
@@ -413,6 +473,9 @@ def _post_correct(brand, message, result):
     if fired:
         return result
     result, fired = _correct_offers_category(brand, message, result)
+    if fired:
+        return result
+    result, fired = _correct_shipment_tracking_category(brand, message, result)
     if fired:
         return result
     return _correct_delivered_item_subtype(brand, message, result)

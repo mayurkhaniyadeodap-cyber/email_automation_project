@@ -16,11 +16,16 @@ logger = logging.getLogger(__name__)
 
 # Category code -> trigger keywords (the fixed 16-category taxonomy).
 KEYWORDS = {
-    "1": ["track", "tracking", "where is my order", "shipment", "delivery status",
-          "when will", "arrive", "courier", "dispatched", "out for delivery"],
+    "1": ["track", "tracking", "where is my order", "where is my parcel", "shipment",
+          "delivery status", "when will", "arrive", "courier", "dispatched", "out for delivery",
+          # Whole-parcel NON-DELIVERY = Shipment Tracking (NOT Missing Item). "missing item" /
+          # "item not received" stays under cat 3 (a specific item absent from a received parcel).
+          "not received", "parcel not received", "order not received", "not delivered",
+          "haven't received", "have not received", "still not received", "not yet delivered",
+          "in transit", "still waiting", "shipment delayed", "delivery delayed", "not arrived"],
     "2": ["change address", "wrong address", "update address", "change my address",
           "correct address", "edit address", "change number"],
-    "3": ["damaged", "damage", "broken", "not received", "missing item", "defective",
+    "3": ["damaged", "damage", "broken", "missing item", "item not received", "defective",
           "wrong item", "leaked", "empty box", "tampered", "spoiled", "received damaged",
           "received damage", "damage order", "damage item", "damage product"],
     "4": ["return to origin", "rto", "returned to seller", "undelivered", "sent back"],
