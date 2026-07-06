@@ -359,12 +359,21 @@ def _pending_needs_order(pending):
 VIDEO_REQUEST_BODY = mails.MAILS["M2"]["en"][1]
 
 
+def _auto_reply_subject(pending=None, *, category="", sub_topic=""):
+    """Concern-based subject for an automated customer email (mails.subject_for), taken from the
+    pending conversation's category + sub-topic (or explicit values). Falls back to
+    'DeoDap Support | Support Request' for an unknown concern."""
+    cat = category or (getattr(pending, "category", "") if pending else "") or ""
+    sub = sub_topic or (getattr(pending, "sub_topic", "") if pending else "") or ""
+    return mails.subject_for(cat, sub)
+
+
 def _send_video_request(mailbox, message, pending):
     """M2: ask the customer for a VIDEO (mandatory for Defective / Missing / Wrong
     Item). Holds the conversation in 'waiting_for_video' -- no ticket, no Care Panel."""
     m2_subject, body = mails.render("M2", pending.language,
                             complaint_ref=_complaint_ref(pending.order_id, pending.language))
-    subject = f"Re: {pending.subject}" if pending.subject else m2_subject
+    subject = _auto_reply_subject(pending)
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -398,7 +407,7 @@ def _send_photo_request(mailbox, message, pending):
     template = "MPAY" if _is_payment_pending(pending) else "M2P"
     m2p_subject, body = mails.render(template, pending.language,
                               complaint_ref=_complaint_ref(pending.order_id, pending.language))
-    subject = f"Re: {pending.subject}" if pending.subject else m2p_subject
+    subject = _auto_reply_subject(pending)
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -502,8 +511,10 @@ def _send_delivered_evidence_request(mailbox, message, pending, case):
     conversation. Reuses the M2/M2P send mechanics (threading, evidence_requests counter); only
     the template + the waiting status differ. English wording per spec, regardless of language."""
     rule = evidence.DELIVERED_EVIDENCE_RULES[case]
-    subject_tpl, body = mails.render(rule["mail"], "en")
-    subject = f"Re: {pending.subject}" if pending.subject else subject_tpl
+    # Use the case-specific template's OWN subject + body (English). The template subject is the
+    # precise per-concern one (e.g. Non-Working -> "... Troubleshooting"), which a keyword-based
+    # subject_for cannot distinguish from Defective.
+    subject, body = mails.render(rule["mail"], "en")
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -821,7 +832,7 @@ def _send_identity_request(mailbox, message, pending):
     """M1: nothing identifying could be extracted or matched -> ask the customer for
     any one of order# / email / mobile / AWB. Holds the case in awaiting_evidence."""
     m1_subject, body = mails.render("M1", pending.language)
-    subject = f"Re: {pending.subject}" if pending.subject else m1_subject
+    subject = _auto_reply_subject(pending)
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -850,7 +861,7 @@ def _send_cancel_lookup(mailbox, message, pending, template="M_CANCEL_LOOKUP"):
     identifier they sent could NOT be verified -- the 'not found, resend a valid one' message
     (M_CANCEL_NOT_FOUND). No evidence, NO ticket; the pending stays open for the next reply."""
     subject, body = mails.render(template, pending.language)
-    subj = f"Re: {pending.subject}" if pending.subject else subject
+    subj = _auto_reply_subject(pending)
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -1090,7 +1101,7 @@ def _send_tracking_lookup(pending):
     """STEP 2: no identifier yet -> ask the customer for ANY ONE of Order Number / Mobile /
     Email (M_TRACK_LOOKUP). No Shopify call, no ticket, no link. Keeps the pending OPEN."""
     subject, body = mails.render("M_TRACK_LOOKUP", pending.language)
-    subj = f"Re: {pending.subject}" if pending.subject else subject
+    subj = _auto_reply_subject(pending)
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -1105,7 +1116,7 @@ def _send_tracking_lookup(pending):
 
 
 def _send_tracking_status(brand, *, to, language, order_id="", phone="", email="", awb="",
-                          subject="", in_reply_to="", references=None):
+                          subject="", in_reply_to="", references=None, category="", sub_topic=""):
     """STEP 4-5-6: look the order up LIVE by ANY ONE identifier (order number / phone /
     registered email) and send the ACTUAL Shopify/courier status. Never a ticket, never a
     care.deodap.in link, never build_tracking_url(). Returns the lookup `info`."""
@@ -1142,7 +1153,11 @@ def _send_tracking_status(brand, *, to, language, order_id="", phone="", email="
     logger.info("TRACKING-EMAIL order_id=%s awb=%s tracking_url=%s",
                 info.get("order_id") or "-", info.get("awb") or "-",
                 info.get("tracking_url") or "-")
-    send_subject = f"Re: {subject}" if subject else subj
+    # Concern-based subject (Shipment Tracking Information / Refund Status Update / ...). Defaults
+    # to Shipment Tracking when the caller didn't pass a category/sub-topic (this IS the tracking
+    # flow). `subject`/`subj` are kept for backward compatibility but no longer drive the subject.
+    send_subject = _auto_reply_subject(category=category or "Shipment & Delivery Tracking",
+                                       sub_topic=sub_topic or "Shipment Tracking")
     # HTML version: render the tracking link as a "View Order Status" hyperlink so the customer
     # never sees the raw URL (BUG 2). A multi-package order keeps EACH per-shipment link (they're
     # linkified individually), so we don't collapse them into one "View Order Status".
@@ -1316,7 +1331,8 @@ def _handle_tracking_pending(mailbox, message, pending):
         mailbox.brand, to=pending.customer_email, language=pending.language,
         order_id=order_id, phone=phone, email=email,
         awb=(pending.extracted or {}).get("awb") or "", subject=pending.subject,
-        in_reply_to=pending.original_message_id, references=refs)
+        in_reply_to=pending.original_message_id, references=refs,
+        category=pending.category, sub_topic=pending.sub_topic)
     _finalize_tracking_pending(pending, info, order_id, mailbox=mailbox, message=message)
     return None, None, True
 
@@ -1407,7 +1423,7 @@ def _dj_settings():
 
 def _inquiry_send(pending, body, *, subject=None, attachments=None):
     """Send an inquiry message to the customer and thread it onto the conversation."""
-    subj = subject or (f"Re: {pending.subject}" if pending.subject else "DeoDap Inquiry")
+    subj = subject or _auto_reply_subject(pending)   # explicit inquiry subject wins; else concern-based
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -1930,7 +1946,7 @@ def _send_verification_failed(pending):
     logger.info("VERIFICATION-FAILED pending=%s customer=%s -> M_VERIFY_FAILED (stays held, "
                 "no ticket).", pending.id, pending.customer_email)
     subject, body = mails.render("M_VERIFY_FAILED", pending.language)
-    subj = f"Re: {pending.subject}" if pending.subject else subject
+    subj = _auto_reply_subject(pending)
     refs = list(pending.references or [])
     if pending.original_message_id and pending.original_message_id not in refs:
         refs.append(pending.original_message_id)
@@ -2082,6 +2098,61 @@ def _verify_cancellation_identifier(brand, *, order_id="", phone="", email="", a
     return proceed, status, info, verified_awb
 
 
+# A reply that is essentially ONLY a number (optionally +91 / spaces / dashes / #).
+_ONLY_NUMBER_RE = re.compile(r"^[+()\-\s#]*\d[\d()\-\s]*$")
+
+
+def _verification_identifiers(pending, message, *, exclude_emails=()):
+    """Detect the identifier(s) in a verification reply -> (order_id, phone, email).
+
+    Priority for a STANDALONE number (the reported case: a customer replies with just a number):
+    the number is offered as an ORDER first and, ONLY when it is a 10-digit mobile, ALSO as a
+    PHONE. Because lookup_tracking tries order -> mobile -> email in that order, a 10-digit ORDER
+    number is verified as an order and never mis-read as a phone. An email is the registered email.
+    A labelled / mixed reply falls back to the shape-based extractors (and the pending's stored
+    values) so existing flows are unchanged."""
+    from apps.classifier.rule_classifier import _extract_order_id, _extract_phone, normalize_phone
+
+    body = _clean_reply(message.get("body_text", "") or "")
+    text = f"{message.get('subject', '') or ''} {body}"
+    email = _extract_email(body, exclude=exclude_emails)
+    stripped = (body or "").strip()
+    if not email and stripped and _ONLY_NUMBER_RE.match(stripped):
+        digits = re.sub(r"\D", "", stripped)
+        if digits:
+            mobile = normalize_phone(digits)          # 10-digit mobile, else ""
+            return digits, (mobile or ""), ""         # order first; mobile only if 10-digit
+    order = _extract_order_id(text) or (pending.order_id if pending else "") or ""
+    phone = _extract_phone(text) or (pending.phone if pending else "") or ""
+    return order, phone, email
+
+
+def _verify_reply_identifier(pending, brand, message, *, exclude_emails=()):
+    """Verify a reply's identifier with ORDER -> MOBILE -> EMAIL priority (see
+    _verification_identifiers). Returns (proceed, status, info, order_id, phone, email) and emits
+    the IDENTIFIER_DETECTED / TRY_*_LOOKUP / SHOPIFY_MATCH|SHOPIFY_NO_MATCH log trail."""
+    order_id, phone, email = _verification_identifiers(pending, message, exclude_emails=exclude_emails)
+    logger.info("IDENTIFIER_DETECTED order=%s mobile=%s email=%s",
+                order_id or "-", phone or "-", email or "-")
+    if order_id:
+        logger.info("TRY_ORDER_LOOKUP order=%s", order_id)
+    if phone:
+        logger.info("TRY_MOBILE_LOOKUP mobile=%s", phone)
+    if email:
+        logger.info("TRY_EMAIL_LOOKUP email=%s", email)
+    # lookup_tracking (via _verify_against_shopify) tries order -> mobile -> email, stopping at the
+    # FIRST match -> exactly the required order-before-mobile priority.
+    proceed, status, info = _verify_against_shopify(brand, order_id, phone, email)
+    if status == "verified":
+        logger.info("SHOPIFY_MATCH matched_by=%s resolved_order=%s customer=%s",
+                    info.get("matched_by") or "-", info.get("order_id") or "-",
+                    info.get("customer_name") or "-")
+    elif status == "not_found":
+        logger.info("SHOPIFY_NO_MATCH order=%s mobile=%s email=%s",
+                    order_id or "-", phone or "-", email or "-")
+    return proceed, status, info, order_id, phone, email
+
+
 def _clear_awaiting_verification(pending):
     ex = dict(pending.extracted or {})
     if ex.pop("awaiting_verification", None) is not None:
@@ -2104,8 +2175,17 @@ def _handle_evidence_verification_request(mailbox, message, result, status):
 
 
 def _request_pending_evidence(mailbox, message, pending):
-    """Ask the customer for the proof the pending's category requires (video-mandatory ->
-    video; else photo). Used right after a successful evidence-category verification."""
+    """Ask the customer for the proof the pending's category requires. Used right after a
+    successful evidence-category verification. A DELIVERED-ITEM concern (Damaged / Defective /
+    Non-working / Wrong Product / Wrong Parcel / Missing) uses its OWN case-specific template
+    (EV_*) via _send_delivered_evidence_request -- the SAME routing the first-email and reply
+    gates use; only when no delivered-item case is detected do we fall back to the generic
+    video/photo request. (Previously this path ALWAYS sent the generic M2/M2P, so the new
+    per-concern templates were ignored for conversations that verified first.)"""
+    case = _pending_delivered_case(pending)
+    if case is not None:
+        _send_delivered_evidence_request(mailbox, message, pending, case)
+        return None, None, True
     level = _pending_evidence_level(pending)
     if level == evidence.EV_VIDEO and not pending.has_video:
         _send_video_request(mailbox, message, pending)
@@ -3772,11 +3852,11 @@ def handle_incoming_email(mailbox, message):
                 _clear_awaiting_verification(pending)
                 # fall through to the evidence/promote gate below
             else:
-                v_order = _validate_order_id(pending, message)
-                v_phone = _validate_phone(pending, message)
-                _o, _p, v_email = _tracking_identifiers(
-                    message, exclude_emails=[mailbox.email_address, pending.customer_email])
-                proceed, status, info = _verify_against_shopify(brand, v_order, v_phone, v_email)
+                # ORDER-first-then-MOBILE-then-EMAIL detection of the reply's identifier (a bare
+                # number is tried as an order first, and only as a mobile when it is 10 digits).
+                proceed, status, info, v_order, v_phone, v_email = _verify_reply_identifier(
+                    pending, brand, message,
+                    exclude_emails=[mailbox.email_address, pending.customer_email])
                 # Escape hatch: after MAX_VERIFY_ATTEMPTS with SOME identifier provided, stop
                 # looping "could not verify" -- create the ticket anyway (flagged unverified)
                 # and let an agent sort it out, so the customer is never trapped.
@@ -3790,11 +3870,17 @@ def handle_incoming_email(mailbox, message):
                 if proceed or escalate:
                     ex = _stamp_verified_customer({**(pending.extracted or {})}, info)
                     ex["verify_attempts"] = attempts
-                    if not proceed:
+                    if proceed:
+                        ex["verified"] = True                # verification succeeded
+                    else:
                         ex["verify_unconfirmed"] = status   # not_found / no_identifier
                     pending.extracted = ex
                     pending.save(update_fields=["extracted", "updated_at"])
-                    _clear_awaiting_verification(pending)
+                    _clear_awaiting_verification(pending)     # never send another verification email
+                    if proceed:
+                        logger.info("VERIFICATION_COMPLETED pending=%s verified=True matched_by=%s "
+                                    "order=%s customer=%s", pending.id, info.get("matched_by") or "-",
+                                    info.get("order_id") or "-", info.get("customer_name") or "-")
                     logger.info("VERIFICATION-RESULT %s pending=%s | VERIFIED-ORDER-ID %s | "
                                 "VERIFIED-CUSTOMER %s",
                                 "verified" if proceed else "escalated_unverified", pending.id,
@@ -3802,9 +3888,9 @@ def handle_incoming_email(mailbox, message):
                     # Evidence category -> NOW ask for the proof. Non-evidence order category
                     # (refund / return / address / RTO / delivered-not-received) -> create now.
                     if _pending_evidence_level(pending) != evidence.EV_NONE:
-                        logger.info("DECISION-ACTION request_evidence pending=%s", pending.id)
+                        logger.info("CONTINUE_NEXT_WORKFLOW pending=%s next=request_evidence", pending.id)
                         return _request_pending_evidence(mailbox, message, pending)
-                    logger.info("DECISION-ACTION create_ticket pending=%s.", pending.id)
+                    logger.info("CONTINUE_NEXT_WORKFLOW pending=%s next=create_ticket", pending.id)
                     ticket = _promote_pending(mailbox, pending, message)
                     return ticket, ticket.messages.order_by("created_at").last(), True
                 # Still failing, under the attempt cap -> ask once more (no infinite loop).

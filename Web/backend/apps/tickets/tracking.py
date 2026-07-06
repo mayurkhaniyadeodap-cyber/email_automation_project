@@ -13,8 +13,21 @@ import logging
 
 from django.http import FileResponse, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.shortcuts import render
+from django.urls import reverse
 
 from apps.tickets.models import Attachment, AuditLogEntry, Message, Ticket
+
+
+def _portal_redirect(hash_id, *, sent=False):
+    """Redirect back to the customer tracking portal for `hash_id`. Built with reverse() so the
+    sub-path prefix (FORCE_SCRIPT_NAME=/email_automation) is included -- a hardcoded "/t" 404s
+    under the sub-path deploy (the reported bug)."""
+    from urllib.parse import urlencode
+
+    params = {"id": hash_id}
+    if sent:
+        params["sent"] = "1"
+    return HttpResponseRedirect(f"{reverse('tracking-page')}?{urlencode(params)}")
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +215,7 @@ def _handle_reply(request, ticket, hash_id):
     comment = (request.POST.get("comment") or "").strip()
     files = request.FILES.getlist("files")
     if not comment and not files:
-        return HttpResponseRedirect(f"/t?id={hash_id}")
+        return _portal_redirect(hash_id)
 
     msg = Message.objects.create(
         ticket=ticket, direction=Message.DIRECTION_INBOUND,
@@ -222,7 +235,7 @@ def _handle_reply(request, ticket, hash_id):
         service.process_existing_reply(ticket)   # promote / decide / confirm as usual
     except Exception:  # noqa: BLE001 -- the portal reply is still recorded
         logger.exception("process_existing_reply failed for %s", ticket.ticket_id)
-    return HttpResponseRedirect(f"/t?id={hash_id}&sent=1")
+    return _portal_redirect(hash_id, sent=True)
 
 
 def tracking_page(request):

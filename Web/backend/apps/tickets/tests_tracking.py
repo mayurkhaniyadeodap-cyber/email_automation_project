@@ -373,3 +373,52 @@ class BuildTrackingUrlTests(TestCase):
         self.assertIn("TRACKING_URL_GENERATED", line)
         self.assertIn("TKT-2026-000090", line)
         self.assertIn("https://care.deodap.in/t?id=zz9", line)
+
+
+class PortalReplyRedirectTests(TestCase):
+    """POST /t?id=<hash> (customer reply) must redirect back to the portal via reverse(), so the
+    sub-path prefix (FORCE_SCRIPT_NAME=/email_automation) is preserved. Root-cause of the 404:
+    the redirect was a hardcoded '/t?...' that dropped the /email_automation prefix."""
+
+    def setUp(self):
+        self.client = Client()
+        self.org = Organization.objects.create(name="DeoDap")
+        self.brand = Brand.objects.create(organization=self.org, name="DeoDap.in")
+        self.mailbox = Mailbox.objects.create(brand=self.brand, email_address="care@deodap.com")
+        self.ticket = Ticket.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="b@x.com", subject="damaged", issue_summary="damaged",
+            extracted={"tracking_hash": "hash123"})
+        # Isolate the redirect: reply-saving is unchanged, but skip the downstream decide/send.
+        self._orig = service.process_existing_reply
+        service.process_existing_reply = lambda t: None
+
+    def tearDown(self):
+        service.process_existing_reply = self._orig
+
+    def test_reply_saved_and_redirects_with_sent(self):
+        from django.urls import reverse
+        from apps.tickets.models import Message
+        before = Message.objects.count()
+        resp = self.client.post("/t", {"id": "hash123", "comment": "please help"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], reverse("tracking-page") + "?id=hash123&sent=1")
+        self.assertEqual(Message.objects.count(), before + 1)        # reply saved (logic unchanged)
+
+    @override_settings(FORCE_SCRIPT_NAME="/email_automation")
+    def test_redirect_includes_subpath_prefix(self):
+        resp = self.client.post("/t", {"id": "hash123", "comment": "hi"})
+        self.assertEqual(resp.status_code, 302)
+        # reverse() prepends the sub-path -> the OLD hardcoded '/t?...' (which 404'd) is gone.
+        self.assertTrue(resp["Location"].startswith("/email_automation/t?id=hash123"),
+                        resp["Location"])
+        self.assertIn("sent=1", resp["Location"])
+
+    def test_empty_reply_redirects_without_sent(self):
+        resp = self.client.post("/t", {"id": "hash123"})             # no comment, no files
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("id=hash123", resp["Location"])
+        self.assertNotIn("sent=1", resp["Location"])
+
+    def test_get_unknown_hash_still_404(self):
+        self.assertEqual(self.client.get("/t?id=nope").status_code, 404)   # GET path unchanged

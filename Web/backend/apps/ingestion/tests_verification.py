@@ -366,9 +366,10 @@ class UniversalEvidenceWorkflowTests(VerificationFlowTests):
             clients=self._clients(match=True),
             classify=self._classify_ev("3. Delivery Issues (Post-Delivery)", "item is damaged",
                                        self.cat3))
-        # The EV_DAMAGED evidence request ("...register your complaint...") is sent exactly
-        # ONCE (the first ask); once the proof arrives it is never re-requested.
-        proof_asks = [s for s in self.sent if "register your complaint" in s["body"].lower()]
+        # The EV_DAMAGED evidence request is sent exactly ONCE (the first ask); once the proof
+        # arrives it is never re-requested.
+        proof_asks = [s for s in self.sent
+                      if "clear images of the damaged product" in s["body"].lower()]
         self.assertEqual(len(proof_asks), 1)               # asked for proof exactly ONCE
         self.assertEqual(Ticket.objects.count(), 1)
 

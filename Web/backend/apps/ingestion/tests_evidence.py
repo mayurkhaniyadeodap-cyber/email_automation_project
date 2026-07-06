@@ -508,3 +508,71 @@ class DeliveredNotReceivedTests(TestCase):
             sub_topic="Order Shown Delivered But Not Received",
             category_ref=cat, sub_topic_ref=sub)
         self.assertFalse(engine._evidence_required(t, sub, {"requires_evidence": True}))
+
+
+class VerifiedEvidenceTemplateTests(TestCase):
+    """After a successful verification, the evidence request (_request_pending_evidence) must use
+    the per-concern EV_* template -- NOT the old generic M2/M2P 'Evidence Required' body."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(name="DeoDap")
+        self.brand = Brand.objects.create(organization=self.org, name="DeoDap.in")
+        self.mailbox = Mailbox.objects.create(brand=self.brand, email_address="care@deodap.com")
+
+    def _pending(self, *, sub_topic, category="3. Delivery Issues", body=""):
+        return PendingConversation.objects.create(
+            organization=self.org, brand=self.brand, mailbox=self.mailbox,
+            customer_email="b@x.com", subject=sub_topic, sub_topic=sub_topic, category=category,
+            body_text=body or sub_topic, issue_summary=body or sub_topic,
+            original_message_id="<a@x>", language="en")
+
+    def _request(self, pending):
+        sent = []
+        orig = service._send_customer_email
+        service._send_customer_email = lambda to, subject, body, **k: (
+            sent.append({"subject": subject, "body": body}) or "<s>")
+        try:
+            service._request_pending_evidence(self.mailbox, {"subject": "", "body_text": ""}, pending)
+        finally:
+            service._send_customer_email = orig
+        return sent[-1]
+
+    def test_damaged_uses_ev_template(self):
+        out = self._request(self._pending(sub_topic="Damaged Item"))
+        self.assertIn("Clear images of the damaged product", out["body"])          # EV_DAMAGED
+        self.assertNotIn("unedited unboxing video AND a clear photo", out["body"])  # NOT generic M2
+        self.assertEqual(out["subject"], "DeoDap Support | Damaged Product - Evidence Required")
+
+    def test_wrong_product_uses_ev_template(self):
+        out = self._request(self._pending(sub_topic="Wrong Item", body="I received the wrong product"))
+        self.assertIn("SKU of the wrong product received", out["body"])            # EV_WRONG_PRODUCT
+        self.assertEqual(out["subject"],
+                         "DeoDap Support | Wrong Product Received - Evidence Required")
+
+    def test_missing_uses_ev_template(self):
+        out = self._request(self._pending(sub_topic="Missing Item", body="an item is missing from the box"))
+        self.assertIn("Image of the POS paper", out["body"])                       # EV_MISSING
+        self.assertEqual(out["subject"], "DeoDap Support | Missing Product - Evidence Required")
+
+    def test_wrong_parcel_uses_ev_template(self):
+        out = self._request(self._pending(sub_topic="Wrong Parcel", body="this is the wrong parcel, not my order"))
+        self.assertIn("shipping label available on the package", out["body"])      # EV_WRONG_PARCEL
+        self.assertEqual(out["subject"],
+                         "DeoDap Support | Wrong Parcel Received - Evidence Required")
+
+    def test_defective_uses_ev_template(self):
+        out = self._request(self._pending(sub_topic="Defective Item", body="the product is defective"))
+        self.assertIn("video clearly demonstrating the defect", out["body"])       # EV_DEFECTIVE
+        self.assertEqual(out["subject"], "DeoDap Support | Defective Product - Evidence Required")
+
+    def test_non_working_uses_ev_template(self):
+        out = self._request(self._pending(sub_topic="Defective Item", body="the item is not working, won't turn on"))
+        self.assertIn("charge the product for", out["body"])                        # EV_NON_WORKING
+        # Non-working has its OWN "Troubleshooting" subject -- distinct from Defective.
+        self.assertEqual(out["subject"], "DeoDap Support | Non-Working Product - Troubleshooting")
+
+    def test_non_delivered_item_falls_back_to_generic(self):
+        # A concern that is NOT a delivered-item case -> the generic request (no EV_* body).
+        out = self._request(self._pending(sub_topic="Quality Issue", category="7. Refund",
+                                          body="bad quality item"))
+        self.assertNotIn("(without cuts)", out["body"])                            # not an EV_* body

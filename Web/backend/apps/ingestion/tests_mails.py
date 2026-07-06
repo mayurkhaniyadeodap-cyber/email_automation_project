@@ -154,3 +154,92 @@ class ConfirmationTrackingLinkTests(TestCase):
         self.assertEqual(len(bodies), 2)
         for b in bodies:
             self.assertIn("https://care.deodap.info/email_automation/t?id=ABChash123", b)
+
+
+class SubjectForTests(TestCase):
+    """Concern-based customer-email subject from the ticket category + sub-topic."""
+
+    def test_example_subjects(self):
+        cases = [
+            ("Damaged Item",     "DeoDap Support | Damaged Product - Evidence Required"),
+            ("Defective Item",   "DeoDap Support | Defective Product - Evidence Required"),
+            ("Wrong Item",       "DeoDap Support | Wrong Item Received - Evidence Required"),
+            ("Missing Item",     "DeoDap Support | Missing Item - Evidence Required"),
+            ("Shipment Tracking","DeoDap Support | Shipment Tracking Information"),
+            ("Refund Status",    "DeoDap Support | Refund Status Update"),
+            ("Payment Issue",    "DeoDap Support | Payment Issue - Support Request"),
+        ]
+        for sub_topic, expected in cases:
+            with self.subTest(sub_topic=sub_topic):
+                self.assertEqual(mails.subject_for("", sub_topic), expected)
+
+    def test_unknown_falls_back_to_support_request(self):
+        self.assertEqual(mails.subject_for("", ""), "DeoDap Support | Support Request")
+        self.assertEqual(mails.subject_for("9. Product Inquiry", "Pre-sale question"),
+                         "DeoDap Support | Support Request")
+
+    def test_sub_topic_wins_over_broad_category(self):
+        # A damaged item filed under a Refund/Return category -> Damaged (sub-topic wins).
+        self.assertEqual(mails.subject_for("7. Return, Refund & Replacement", "Damaged Item"),
+                         "DeoDap Support | Damaged Product - Evidence Required")
+
+    def test_category_only_shipment_tracking(self):
+        self.assertEqual(mails.subject_for("1. Shipment & Delivery Tracking", ""),
+                         "DeoDap Support | Shipment Tracking Information")
+
+    def test_matches_real_subtopic_codes(self):
+        # The stored sub-topic strings carry a code prefix (e.g. "3.3 Damaged Item").
+        self.assertEqual(mails.subject_for("3. Delivery Issues", "3.3 Damaged Item"),
+                         "DeoDap Support | Damaged Product - Evidence Required")
+
+    def test_auto_reply_subject_wrapper(self):
+        from apps.ingestion import service
+
+        class P:
+            category = "8. Payment & Invoice"
+            sub_topic = "Payment Issue"
+        self.assertEqual(service._auto_reply_subject(P()),
+                         "DeoDap Support | Payment Issue - Support Request")
+        self.assertEqual(service._auto_reply_subject(None),   # no pending -> default
+                         "DeoDap Support | Support Request")
+
+
+class EvidenceTemplateTests(TestCase):
+    """Each delivered-item evidence template renders its EXACT per-concern subject + body."""
+
+    EXPECT = {
+        "EV_DAMAGED": ("DeoDap Support | Damaged Product - Evidence Required",
+                       ["Dear Customer,", "received a damaged product",
+                        "Unboxing video (without cuts) – Mandatory",
+                        "Clear images of the damaged product – Mandatory",
+                        "our support team will review your request"]),
+        "EV_NON_WORKING": ("DeoDap Support | Non-Working Product - Troubleshooting",
+                           ["your product is not working", "charge the product for 3–4 hours",
+                            "A clear video showing that the product is not working"]),
+        "EV_MISSING": ("DeoDap Support | Missing Product - Evidence Required",
+                       ["an item is missing from your order",
+                        "Unboxing video (without cuts) – Mandatory",
+                        "Image of the POS paper – Mandatory"]),
+        "EV_WRONG_PRODUCT": ("DeoDap Support | Wrong Product Received - Evidence Required",
+                             ["received the wrong product",
+                              "Unboxing video (without cuts) – Mandatory",
+                              "Clear images of the wrong product received",
+                              "SKU of the wrong product received"]),
+        "EV_WRONG_PARCEL": ("DeoDap Support | Wrong Parcel Received - Evidence Required",
+                            ["received the wrong parcel", "Image of the POS paper",
+                             "Clear images of all products received",
+                             "Product count/quantity received",
+                             "shipping label available on the package"]),
+        "EV_DEFECTIVE": ("DeoDap Support | Defective Product - Evidence Required",
+                         ["received a defective product", "Clear images showing the defect",
+                          "video clearly demonstrating the defect (if applicable)"]),
+    }
+
+    def test_each_evidence_template(self):
+        for mail_id, (subject, phrases) in self.EXPECT.items():
+            with self.subTest(mail_id=mail_id):
+                subj, body = mails.render(mail_id, "en")
+                self.assertEqual(subj, subject)
+                for phrase in phrases:
+                    self.assertIn(phrase, body)
+                self.assertTrue(body.rstrip().endswith("Regards,\nDeoDap Support Team"))

@@ -32,6 +32,47 @@ SIGN = {
 }
 
 # --------------------------------------------------------------------------- #
+# Dynamic customer-email SUBJECT from the ticket's category + sub-topic, so a reply reflects the
+# customer's actual concern (e.g. "DeoDap Support | Damaged Product - Evidence Required") instead
+# of a generic "Re: <their subject>". Unknown -> "DeoDap Support | Support Request".
+# --------------------------------------------------------------------------- #
+SUBJECT_PREFIX = "DeoDap Support | "
+DEFAULT_SUBJECT = SUBJECT_PREFIX + "Support Request"
+
+# Ordered, MOST-SPECIFIC first. Keywords are matched against (sub_topic + category), lower-cased,
+# so the delivered-item sub-types win over the broader category they live in.
+_SUBJECT_RULES = (
+    (("damaged", "damage", "broken", "cracked", "torn", "leaking", "dented", "shattered"),
+     "Damaged Product - Evidence Required"),
+    (("defective", "not working", "doesn't work", "does not work", "malfunction", "faulty",
+      "dead product", "stopped working"), "Defective Product - Evidence Required"),
+    (("wrong parcel", "wrong package", "wrong shipment"),
+     "Wrong Parcel Received - Evidence Required"),
+    (("wrong item", "wrong product", "different product", "different item", "incorrect item",
+      "received wrong"), "Wrong Item Received - Evidence Required"),
+    (("missing",), "Missing Item - Evidence Required"),
+    (("payment", "deducted", "overcharge", "double charge", "not credited"),
+     "Payment Issue - Support Request"),
+    (("refund",), "Refund Status Update"),
+    (("cancel",), "Order Cancellation - Support Request"),
+    (("shipment", "tracking", "track", "where is my order", "delivery status", "delayed",
+      "out for delivery", "rto", "return to origin"), "Shipment Tracking Information"),
+)
+
+
+def subject_for(category="", sub_topic=""):
+    """Return the concern-based customer-email subject for a ticket's category + sub-topic.
+
+    Falls back to "DeoDap Support | Support Request" when the concern can't be identified. Pure
+    and side-effect-free -- safe to call from any outbound-email flow."""
+    text = " ".join(t for t in (sub_topic or "", category or "") if t).lower()
+    if text.strip():
+        for keywords, tail in _SUBJECT_RULES:
+            if any(k in text for k in keywords):
+                return SUBJECT_PREFIX + tail
+    return DEFAULT_SUBJECT
+
+# --------------------------------------------------------------------------- #
 # Registry: MAILS[mail_id][lang] = (subject, body_without_signature)
 # Placeholders: {complaint_ref} {order_ref} {ticket_number} {tracking_url} {missing} {answer}
 # --------------------------------------------------------------------------- #
@@ -217,61 +258,65 @@ MAILS = {
                "કૃપા કરીને અપલોડ કરો:\n• પેમેન્ટ સ્ક્રીનશોટ (ફરજિયાત)\n\n"
                "આ અમને વ્યવહાર ચકાસવા અને સમસ્યાની તપાસ કરવામાં મદદ કરે છે."),
     },
-    # --- Delivered-Item evidence requests (exact per-case wording; §"Delivered Item Related") ---
-    # The signature ("Regards, DeoDap Support Team") is appended by render(); bodies exclude it.
-    # These are sent in English (the spec wording) regardless of the customer's language.
-    # EV_DAMAGED — Damaged product: unboxing video AND clear images, both mandatory.
+    # --- Delivered-Item evidence requests (exact per-concern subject + body). The concern is
+    # detected by evidence.delivered_evidence_case(); _send_delivered_evidence_request selects the
+    # template via DELIVERED_EVIDENCE_RULES[case]["mail"] and uses the TEMPLATE's subject + body.
+    # English-only (spec wording); the "Regards, DeoDap Support Team" signature is appended by
+    # render(), so bodies stop before it. ------------------------------------------------------- #
     "EV_DAMAGED": {
-        "en": ("Photo & video required to register your complaint",
-               "Sorry to hear that.\n\n"
-               "To register your complaint, please reply with:\n\n"
-               "• Unboxing video (without cuts) (Mandatory)\n"
-               "• Clear images of the damaged product (Mandatory)"),
+        "en": ("DeoDap Support | Damaged Product - Evidence Required",
+               "Dear Customer,\n\n"
+               "We are sorry to hear that you received a damaged product.\n\n"
+               "To process your request, please reply with:\n\n"
+               "• Unboxing video (without cuts) – Mandatory\n"
+               "• Clear images of the damaged product – Mandatory\n\n"
+               "Once we receive the required evidence, our support team will review your request "
+               "and assist you further."),
     },
-    # EV_NON_WORKING — Non-working product: test after charging, then a video (only video mandatory).
     "EV_NON_WORKING": {
-        "en": ("Please test the product and share a video",
-               "Sorry to hear that.\n\n"
-               "Before registering the complaint, please charge the product for 3–4 hours "
-               "and test it again.\n\n"
+        "en": ("DeoDap Support | Non-Working Product - Troubleshooting",
+               "Dear Customer,\n\n"
+               "We are sorry to hear that your product is not working.\n\n"
+               "Before proceeding, please charge the product for 3–4 hours and try using it "
+               "again.\n\n"
                "If the issue still persists, please reply with:\n\n"
-               "• Clear video showing the product is not working."),
+               "• A clear video showing that the product is not working\n\n"
+               "Our support team will review your request and assist you further."),
     },
-    # EV_MISSING — Missing product: unboxing video AND image of the POS paper, both mandatory.
     "EV_MISSING": {
-        "en": ("Video & POS paper required to register your complaint",
-               "Sorry to hear that.\n\n"
+        "en": ("DeoDap Support | Missing Product - Evidence Required",
+               "Dear Customer,\n\n"
+               "We are sorry to hear that an item is missing from your order.\n\n"
                "Please reply with:\n\n"
-               "• Unboxing video (without cuts)\n"
-               "• Image of the POS paper\n\n"
-               "Both are mandatory."),
+               "• Unboxing video (without cuts) – Mandatory\n"
+               "• Image of the POS paper – Mandatory"),
     },
-    # EV_WRONG_PRODUCT — Wrong product received: video, images and the SKU, all mandatory.
     "EV_WRONG_PRODUCT": {
-        "en": ("Video, photo & SKU required to register your complaint",
-               "Sorry to hear that.\n\n"
+        "en": ("DeoDap Support | Wrong Product Received - Evidence Required",
+               "Dear Customer,\n\n"
+               "We are sorry to hear that you received the wrong product.\n\n"
                "Please reply with:\n\n"
-               "• Unboxing video (without cuts)\n"
-               "• Clear images of the wrong product\n"
-               "• SKU of the wrong product"),
+               "• Unboxing video (without cuts) – Mandatory\n"
+               "• Clear images of the wrong product received\n"
+               "• SKU of the wrong product received"),
     },
-    # EV_WRONG_PARCEL — Wrong parcel received: POS + all product images + count + shipping label.
     "EV_WRONG_PARCEL": {
-        "en": ("Photos & parcel details required to register your complaint",
-               "Sorry to hear that.\n\n"
+        "en": ("DeoDap Support | Wrong Parcel Received - Evidence Required",
+               "Dear Customer,\n\n"
+               "We are sorry to hear that you received the wrong parcel.\n\n"
                "Please reply with:\n\n"
                "• Image of the POS paper\n"
                "• Clear images of all products received\n"
-               "• Product count received\n"
-               "• Image of the parcel shipping label"),
+               "• Product count/quantity received\n"
+               "• Image of the shipping label available on the package"),
     },
-    # EV_DEFECTIVE — Defective product: images showing the defect AND a video, both mandatory.
     "EV_DEFECTIVE": {
-        "en": ("Photo & video required to register your complaint",
-               "Sorry to hear that.\n\n"
+        "en": ("DeoDap Support | Defective Product - Evidence Required",
+               "Dear Customer,\n\n"
+               "We are sorry to hear that you received a defective product.\n\n"
                "Please reply with:\n\n"
                "• Clear images showing the defect\n"
-               "• Video clearly demonstrating the defect"),
+               "• A video clearly demonstrating the defect (if applicable)"),
     },
     # (M3 "order# + phone required" was REMOVED -- order id / phone no longer block
     #  ticket creation, so no such request is ever sent.)
