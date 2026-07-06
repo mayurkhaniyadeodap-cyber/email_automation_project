@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Autocomplete from "@mui/material/Autocomplete";
 import Box from "@mui/material/Box";
-import CircularProgress from "@mui/material/CircularProgress";
 import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import { api } from "../api";
@@ -94,20 +93,10 @@ export default function SearchAutocomplete({
         onSearch(text);
       }}
       renderInput={(params) => (
-        <TextField
-          {...params}
-          size={size}
-          placeholder={placeholder}
-          InputProps={{
-            ...params.InputProps,
-            endAdornment: (
-              <>
-                {loading ? <CircularProgress color="inherit" size={16} /> : null}
-                {params.InputProps.endAdornment}
-              </>
-            ),
-          }}
-        />
+        // Spread params straight through -- MUI v9 exposes input props via slotProps, not
+        // params.InputProps, so we must NOT reach into it. The `loading` prop above already
+        // renders a loading indicator in the dropdown.
+        <TextField {...params} placeholder={placeholder} />
       )}
       renderOption={(props, option) => {
         const { key, ...rest } = props;
