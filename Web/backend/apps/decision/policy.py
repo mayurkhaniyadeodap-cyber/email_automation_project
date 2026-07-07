@@ -215,6 +215,49 @@ def payment_no_order(text):
     return bool(_PAYMENT_NO_ORDER_RE.search(text or ""))
 
 
+# Double Payment / Payment Deducted Twice ("Extra / Double Payment Refund", sub-topic 8.4). The
+# customer was charged/deducted TWICE (distinct from payment_no_order = paid but no order). Drives
+# the progressive-collection workflow (Registered Mobile + Payment Screenshot -> verify -> ticket).
+_DOUBLE_PAYMENT_KW = (
+    "double payment", "double charge", "double charged", "double debit", "charged twice",
+    "charged double", "paid twice", "payment twice", "pay twice", "deducted twice", "debited twice",
+    "twice deducted", "twice debited", "twice charged", "amount deducted twice",
+    "amount debited twice", "duplicate payment", "duplicate charge", "paid double",
+    "money deducted twice", "payment deducted twice", "made the payment twice", "made payment twice",
+    "paid the amount twice", "same amount twice", "paid extra", "extra payment",
+)
+_DOUBLE_PAYMENT_RE = _re.compile(
+    r"\b(twice|two\s+times|double|duplicate)\b.{0,40}?"
+    r"\b(pay|paid|payment|amount|charg|deduct|debit|money|transaction)\b"
+    r"|\b(pay|paid|payment|amount|charg|deduct|debit|money|transaction)\b.{0,40}?"
+    r"\b(twice|two\s+times|double|duplicate)\b",
+    _re.IGNORECASE | _re.DOTALL)
+
+
+def double_payment(text):
+    """True when the customer says they were charged/deducted TWICE (double payment / paid twice /
+    amount deducted twice). Distinct from payment_no_order (paid but the order was not placed)."""
+    low = (text or "").lower()
+    if any(k in low for k in _DOUBLE_PAYMENT_KW):
+        return True
+    return bool(_DOUBLE_PAYMENT_RE.search(text or ""))
+
+
+# Cash on Delivery (COD) inquiry -> DeoDap is ONLINE PREPAID ONLY; COD is never available. A fixed
+# auto-reply (no ticket, no manual review, no pincode ask). Word-boundary matched so 'cod' never
+# fires inside 'code'/'codes' and 'c.o.d' variants are caught.
+_COD_RE = _re.compile(
+    r"\bcash\s+on\s+delivery\b|\bcash\s+payment\b|\bpay\s+on\s+delivery\b"
+    r"|\bcod\b|\bc\.o\.d\.?",
+    _re.IGNORECASE)
+
+
+def cod_inquiry(text):
+    """True when the customer is asking about Cash on Delivery / COD / pay-on-delivery / cash
+    payment (e.g. 'is COD available?', 'do you offer cash on delivery?')."""
+    return bool(_COD_RE.search(text or ""))
+
+
 # HIGH-PRIORITY ESCALATION: legal / consumer-court / grievance / police / media / reputation.
 # Detecting ANY of these STOPS all automation -> the email goes to the manual-review queue, no
 # ticket and no automatic customer email. Word-boundary matched (longest phrase first) so e.g.

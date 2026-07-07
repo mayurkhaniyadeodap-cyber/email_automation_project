@@ -891,19 +891,22 @@ class VerificationFirstTicketTests(VerificationFlowTests):
     # 1) Verified customer -> ticket created. (Payment is a generic verify-first ticket
     #    category -- cat 15 now has its OWN guided flow, see tests_guided.)
     def test_verified_customer_creates_ticket(self):
-        self._run(eml(subject="payment", body=f"I was charged twice. mobile {self.PHONE}",
+        # NOTE: 'charged twice' now routes to the dedicated Double Payment workflow (see
+        # tests_double_payment). This verify-first test uses a GENERIC payment complaint instead.
+        self._run(eml(subject="payment", body=f"I was overcharged on my order. mobile {self.PHONE}",
                       message_id="<a@x>"),
                   clients=self._shop(),
-                  classify=self._classify("8. Payment & Invoice", self.cat8, "charged twice"))
+                  classify=self._classify("8. Payment & Invoice", self.cat8, "overcharged on my order"))
         self.assertEqual(Ticket.objects.count(), 1)
         from apps.integrations.care_panel_store import _customer_name
         self.assertEqual(_customer_name(Ticket.objects.get()), "Verified Owner")
 
     # 2) Unverified customer -> verification email sent, NO ticket.
     def test_unverified_customer_blocked_no_ticket(self):
-        self._run(eml(subject="payment", body="I was charged twice", message_id="<a@x>"),
+        # Generic payment complaint (NOT 'charged twice', which now has its own Double Payment flow).
+        self._run(eml(subject="payment", body="I was overcharged on my order", message_id="<a@x>"),
                   clients=self._shop(),
-                  classify=self._classify("8. Payment & Invoice", self.cat8, "charged twice"))
+                  classify=self._classify("8. Payment & Invoice", self.cat8, "overcharged on my order"))
         self.assertEqual(Ticket.objects.count(), 0)
         self.assertEqual(PendingConversation.objects.count(), 1)
         self.assertIn("could not verify", self._last()["body"].lower())

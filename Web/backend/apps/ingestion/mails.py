@@ -77,6 +77,28 @@ def subject_for(category="", sub_topic=""):
 # Placeholders: {complaint_ref} {order_ref} {ticket_number} {tracking_url} {missing} {answer}
 # --------------------------------------------------------------------------- #
 MAILS = {
+    # COD_INFO — Cash on Delivery inquiry: DeoDap is online-prepaid ONLY. Fixed auto-reply,
+    # no ticket, no pincode. Signature (Regards,\nDeoDap Support Team) is appended by render().
+    "COD_INFO": {
+        "en": ("Cash on Delivery (COD) Information",
+               "Dear Customer,\n\n"
+               "Thank you for contacting DeoDap.\n\n"
+               "Currently, Cash on Delivery (COD) is not available.\n\n"
+               "All orders can be placed using our secure online prepaid payment methods.\n\n"
+               "If you need any other assistance, simply reply to this email."),
+        "hi": ("कैश ऑन डिलीवरी (COD) जानकारी",
+               "प्रिय ग्राहक,\n\n"
+               "DeoDap से संपर्क करने के लिए धन्यवाद।\n\n"
+               "फ़िलहाल, कैश ऑन डिलीवरी (COD) उपलब्ध नहीं है।\n\n"
+               "सभी ऑर्डर हमारे सुरक्षित ऑनलाइन प्रीपेड भुगतान तरीकों से किए जा सकते हैं।\n\n"
+               "किसी अन्य सहायता के लिए, बस इस ईमेल का उत्तर दें।"),
+        "gu": ("કેશ ઓન ડિલિવરી (COD) માહિતી",
+               "પ્રિય ગ્રાહક,\n\n"
+               "DeoDap નો સંપર્ક કરવા બદલ આભાર.\n\n"
+               "હાલમાં, કેશ ઓન ડિલિવરી (COD) ઉપલબ્ધ નથી.\n\n"
+               "બધા ઓર્ડર અમારી સુરક્ષિત ઓનલાઇન પ્રીપેડ ચુકવણી પદ્ધતિઓથી કરી શકાય છે.\n\n"
+               "કોઈપણ અન્ય સહાય માટે, ફક્ત આ ઈમેલનો જવાબ આપો."),
+    },
     # M1 — nothing identifying could be extracted or matched via the APIs.
     "M1": {
         "en": ("We need a few details to find your order",

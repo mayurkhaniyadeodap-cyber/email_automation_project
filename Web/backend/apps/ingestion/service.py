@@ -1442,6 +1442,51 @@ def _verification_inquiry_kind(message):
 # for order verification / registered email / AWB and NEVER creates a support ticket.
 # ======================================================================================= #
 
+def _is_cod_inquiry(message):
+    """True when the email asks about Cash on Delivery / COD / pay-on-delivery / cash payment."""
+    from apps.decision import policy
+
+    blob = f"{message.get('subject','') or ''} {message.get('body_text') or message.get('snippet') or ''}"
+    return policy.cod_inquiry(blob)
+
+
+def _handle_cod_inquiry(mailbox, message, gmid):
+    """CASH ON DELIVERY inquiry -> send the fixed 'online prepaid only' reply and mark the
+    conversation Auto Resolved. NO ticket, NO pending, NO Care Panel, NO manual review, NO pincode.
+    Duplicate auto-replies for the SAME conversation are prevented (the same-message re-fetch is
+    already blocked by the ProcessedEmail claim; this also blocks a second COD reply on the thread)."""
+    from apps.tickets.models import ProcessedEmail
+
+    thread_id = message.get("thread_id") or gmid or ""
+    to = message.get("from_email") or ""
+    logger.info("COD_INQUIRY_DETECTED message_id=%s thread_id=%s from=%s", gmid or "-",
+                thread_id or "-", to or "-")
+
+    # Prevent duplicate auto-replies for the SAME conversation: if a message THIS one is replying
+    # to already received a COD auto-reply, do not send another. (The identical email re-fetched is
+    # already blocked by the ProcessedEmail claim above; this covers a reply within the thread.)
+    parent_refs = [r for r in [message.get("in_reply_to"), *(message.get("references") or [])] if r]
+    if parent_refs and ProcessedEmail.objects.filter(
+            mailbox=mailbox, auto_reply_sent=True, message_id__in=parent_refs).exists():
+        logger.info("COD_AUTO_REPLY_SKIPPED message_id=%s reason=already_replied_in_conversation",
+                    gmid or "-")
+        _mark_processed_complete(gmid, auto_reply_sent=False)
+        return None, None, False
+
+    subject, body = mails.render("COD_INFO", "en")     # English wording per spec, regardless of language
+    refs = [message["message_id"]] if message.get("message_id") else []
+    sent_id = _send_customer_email(to, subject, body,
+                                   in_reply_to=message.get("message_id"), references=refs)
+    logger.info("COD_AUTO_REPLY_SENT message_id=%s to=%s delivered=%s", gmid or "-", to or "-",
+                bool(sent_id))
+    # Mark Auto Resolved: fully handled with an auto-reply, NO ticket. The completed ProcessedEmail
+    # (auto_reply_sent=True) is the record of the auto-resolved conversation.
+    _mark_processed_complete(gmid, auto_reply_sent=True)
+    logger.info("COD_AUTO_RESOLVED message_id=%s thread_id=%s (no ticket, no manual review).",
+                gmid or "-", thread_id or "-")
+    return None, None, True
+
+
 def _detect_inquiry(message):
     """Inquiry sub-type for a NEW email (subject + body), or None."""
     from apps.ingestion import inquiry
@@ -2148,6 +2193,140 @@ def _verify_cancellation_identifier(brand, *, order_id="", phone="", email="", a
         logger.info("ORDER_NOT_FOUND status=%s order=%s phone=%s email=%s awb=%s", status,
                     order_id or "-", phone or "-", email or "-", awb or "-")
     return proceed, status, info, verified_awb
+
+
+# --------------------------------------------------------------------------------------- #
+# Double Payment / Payment Deducted Twice -- PROGRESSIVE collection (NEVER an immediate ticket).
+# Collect BOTH a Registered Mobile Number (parsed from the reply text) AND a Payment Screenshot
+# (photo attachment) before creating a ticket. Ask ONLY for what is still missing, never repeat
+# the same request, verify the customer by mobile, then promote (ticket + M5 confirmation). The
+# pending is consumed on promotion, so a re-fetch can never create a duplicate ticket.
+# --------------------------------------------------------------------------------------- #
+def _is_double_payment(message, result):
+    """True when this email is a 'double payment / deducted twice / paid twice' concern."""
+    from apps.decision import policy
+
+    blob = " ".join(filter(None, [
+        message.get("subject", "") or "", message.get("body_text", "") or "",
+        getattr(result, "sub_topic", "") or "", getattr(result, "issue_summary", "") or ""]))
+    return policy.double_payment(blob)
+
+
+def _dp_extract_mobile(message):
+    from apps.classifier.rule_classifier import _extract_phone
+
+    return _extract_phone(f"{message.get('subject','')} {message.get('body_text','')}") or ""
+
+
+def _handle_double_payment_first_email(mailbox, message, result):
+    """FIRST email of a Double Payment concern: hold a pending (NEVER a ticket yet), record
+    whatever the email already carries (mobile / screenshot), then progress."""
+    pending = _create_pending(mailbox, message, result, status="awaiting_evidence")
+    pending.extracted = {**(pending.extracted or {}), "intent": "DOUBLE_PAYMENT"}
+    fields = ["extracted"]
+    mobile = _dp_extract_mobile(message)
+    if mobile and not pending.phone:
+        pending.phone = mobile
+        fields.append("phone")
+    if _message_has_photo(message) and not pending.has_photo:
+        pending.has_photo = True
+        fields.append("has_photo")
+    pending.save(update_fields=list(dict.fromkeys(fields)) + ["updated_at"])
+    logger.info("DOUBLE-PAYMENT-START pending=%s mobile=%s screenshot=%s", pending.id,
+                bool(pending.phone), bool(pending.has_photo))
+    return _double_payment_step(mailbox, message, pending)
+
+
+def _handle_double_payment_pending(mailbox, message, pending):
+    """A reply on a held Double Payment conversation: re-parse the mobile + detect a screenshot
+    from THIS reply (attachments were already folded in by _accumulate_pending), then progress."""
+    mobile = _dp_extract_mobile(message)
+    fields = []
+    if mobile and not pending.phone:
+        pending.phone = mobile
+        fields.append("phone")
+    if _message_has_photo(message) and not pending.has_photo:
+        pending.has_photo = True
+        fields.append("has_photo")
+    if fields:
+        pending.save(update_fields=fields + ["updated_at"])
+    return _double_payment_step(mailbox, message, pending)
+
+
+def _double_payment_step(mailbox, message, pending):
+    """Core progressive gate. Ask ONLY for the missing item(s); once BOTH the mobile AND the
+    screenshot are present, verify the customer by mobile and create the ticket (+ M5 email)."""
+    have_mobile = bool(pending.phone)
+    have_shot = bool(pending.has_photo)
+    logger.info("DOUBLE-PAYMENT-STATE pending=%s have_mobile=%s have_screenshot=%s",
+                pending.id, have_mobile, have_shot)
+    if have_mobile and have_shot:
+        proceed, status, info = _verify_against_shopify(mailbox.brand, "", pending.phone, "")
+        if proceed:
+            pending.extracted = _stamp_verified_customer({**(pending.extracted or {})}, info)
+            pending.save(update_fields=["extracted", "updated_at"])
+            logger.info("DOUBLE-PAYMENT-VERIFIED pending=%s status=%s -> creating ticket.",
+                        pending.id, status)
+            ticket = _promote_pending(mailbox, pending, message)   # ticket + Care Panel + M5; clears pending
+            return ticket, ticket.messages.order_by("created_at").last(), True
+        # Mobile did not verify. Cap the retries so a genuine payment complaint is never trapped.
+        attempts = int((pending.extracted or {}).get("dp_verify_attempts", 0)) + 1
+        pending.extracted = {**(pending.extracted or {}), "dp_verify_attempts": attempts}
+        if attempts >= MAX_VERIFY_ATTEMPTS:
+            pending.save(update_fields=["extracted", "updated_at"])
+            logger.info("DOUBLE-PAYMENT-UNVERIFIED pending=%s attempts=%s -> create ticket (agent).",
+                        pending.id, attempts)
+            ticket = _promote_pending(mailbox, pending, message)
+            return ticket, ticket.messages.order_by("created_at").last(), True
+        pending.phone = ""      # drop the unverified number so a fresh one is parsed next reply
+        pending.save(update_fields=["phone", "extracted", "updated_at"])
+        _send_double_payment_request(mailbox, message, pending, need_mobile=True,
+                                     need_shot=False, reason="unverified_mobile")
+        return None, None, True
+    _send_double_payment_request(mailbox, message, pending,
+                                 need_mobile=not have_mobile, need_shot=not have_shot)
+    return None, None, True
+
+
+def _send_double_payment_request(mailbox, message, pending, *, need_mobile, need_shot, reason=""):
+    """Ask ONLY for the still-missing item(s). Never re-sends the SAME request (tracked via
+    extracted['dp_asked']) and never asks for evidence already received."""
+    missing = (["mobile"] if need_mobile else []) + (["screenshot"] if need_shot else [])
+    if not missing:
+        return
+    ask_key = reason or "+".join(missing)
+    if (pending.extracted or {}).get("dp_asked") == ask_key:
+        logger.info("DOUBLE-PAYMENT-SKIP pending=%s ask=%s already sent -- not repeating.",
+                    pending.id, ask_key)
+        return
+    if reason == "unverified_mobile":
+        lines = ["We could not verify the mobile number you shared for the double-payment refund.",
+                 "",
+                 "Please reply with your Registered Mobile Number (the number used to place the order)."]
+    else:
+        lines = ["Thank you for reaching out about the double payment (amount deducted twice).",
+                 "To verify and process your refund, please reply with:", ""]
+        if need_mobile:
+            lines.append("• Registered Mobile Number")
+        if need_shot:
+            lines.append("• Payment Screenshot")
+    code = mails.normalize_lang(pending.language)
+    body = "\n".join(lines) + f"\n\n{mails.SIGN[code]}"
+    subject = _auto_reply_subject(pending)
+    refs = list(pending.references or [])
+    if pending.original_message_id and pending.original_message_id not in refs:
+        refs.append(pending.original_message_id)
+    sent_id = _send_customer_email(pending.customer_email, subject, body,
+                                   in_reply_to=pending.original_message_id, references=refs)
+    pending.extracted = {**(pending.extracted or {}), "dp_asked": ask_key}
+    pending.evidence_requests = (pending.evidence_requests or 0) + 1
+    pending.status = "awaiting_evidence"
+    if sent_id:
+        pending.last_message_id = sent_id
+    pending.save(update_fields=["extracted", "evidence_requests", "status", "last_message_id",
+                                "updated_at"])
+    logger.info("DOUBLE-PAYMENT-REQUEST pending=%s need_mobile=%s need_screenshot=%s ask=%s",
+                pending.id, need_mobile, need_shot, ask_key)
 
 
 # A reply that is essentially ONLY a number (optionally +91 / spaces / dashes / #).
@@ -3835,6 +4014,11 @@ def handle_incoming_email(mailbox, message):
         if (pending.extracted or {}).get("intent") == "INQUIRY":
             return _handle_inquiry_reply(mailbox, message, pending)
 
+        # Double Payment held conversation: re-parse the mobile + accumulate the screenshot; ask
+        # ONLY for the missing item, and create the ticket once BOTH are present (+ verified).
+        if (pending.extracted or {}).get("intent") == "DOUBLE_PAYMENT":
+            return _handle_double_payment_pending(mailbox, message, pending)
+
         # Cancellation conversation: every reply is PARSED AFRESH. We extract the newest Order
         # Number / mobile / AWB / Registered Email from THIS reply and verify THAT -- never the
         # previously-stored (possibly invalid) value. Verified -> ticket + clear pending; not
@@ -4047,6 +4231,13 @@ def handle_incoming_email(mailbox, message):
             process_existing_reply(ticket)
         return ticket, msg, created
 
+    # 4-cod) CASH ON DELIVERY inquiry -> fixed 'online prepaid only' auto-reply + Auto Resolved.
+    #        DeoDap is online-prepaid ONLY; COD is never available. NO ticket, NO manual review,
+    #        NO pincode ask. Runs BEFORE classification so a COD email is never routed into the
+    #        serviceability / pincode flow. De-duplicated per conversation.
+    if _is_cod_inquiry(message):
+        return _handle_cod_inquiry(mailbox, message, gmid)
+
     # 4-inquiry) DEDICATED INQUIRY WORKFLOW -- runs FIRST. Franchisee / Dropshipping / Company
     #            Profile / Invoice / Other business inquiries go into a multi-step conversation,
     #            NEVER the support / verification / complaint flow (no order verify, no M1, no
@@ -4067,6 +4258,12 @@ def handle_incoming_email(mailbox, message):
     #           into the damage / evidence workflow, even if the AI mis-classified it.
     if result is not None and result.is_support_request and _is_cancellation(message, result):
         return _handle_cancellation(mailbox, message, result)
+
+    # 4-double-payment) DOUBLE PAYMENT / deducted twice: NEVER an immediate ticket. Progressive
+    #   collection of Registered Mobile + Payment Screenshot -> verify -> ticket. Must run before
+    #   the generic evidence gate (which would ask only for a photo, not the mobile).
+    if result is not None and result.is_support_request and _is_double_payment(message, result):
+        return _handle_double_payment_first_email(mailbox, message, result)
 
     # 4-track) Shipment Tracking: explicit-identifier-only. We NEVER auto-track from the
     #          sender's email address -- this is handled entirely here (bypassing the
