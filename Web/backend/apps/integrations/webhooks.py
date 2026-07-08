@@ -29,22 +29,13 @@ from rest_framework.decorators import (
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
+from apps.integrations import care_panel_status
 from apps.tickets.models import AuditLogEntry, Message, Ticket
 
 logger = logging.getLogger(__name__)
 
-# External status string -> internal Ticket status. Keys are matched case-insensitively
-# with spaces/hyphens normalized to underscores.
-STATUS_MAP = {
-    "in_progress": Ticket.STATUS_IN_PROGRESS,
-    "in_process": Ticket.STATUS_IN_PROGRESS,
-    "processing": Ticket.STATUS_IN_PROGRESS,
-    "open": Ticket.STATUS_IN_PROGRESS,
-    "resolved": Ticket.STATUS_RESOLVED,
-    "completed": Ticket.STATUS_RESOLVED,
-    "closed": Ticket.STATUS_CLOSED,
-    "escalated": Ticket.STATUS_ESCALATED,
-}
+# Status mapping is shared with the polling job so there is ONE source of truth.
+STATUS_MAP = care_panel_status.STATUS_MAP
 
 
 def _auth_ok(request):
@@ -75,8 +66,7 @@ def _find_ticket(payload):
 
 
 def _normalize_status(value):
-    key = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    return STATUS_MAP.get(key)
+    return care_panel_status.normalize(value)
 
 
 @api_view(["POST"])
@@ -95,17 +85,11 @@ def care_panel_webhook(request):
 
     actions = []
 
-    # 1) Mirror the status the agent set in the panel.
-    new_status = _normalize_status(payload.get("status"))
-    if new_status and new_status != ticket.status:
-        old = ticket.status
-        ticket.status = new_status
-        if new_status in (Ticket.STATUS_RESOLVED, Ticket.STATUS_CLOSED) and not ticket.resolved_at:
-            ticket.resolved_at = timezone.now()
-        ticket.save(update_fields=["status", "resolved_at", "updated_at"])
-        AuditLogEntry.objects.create(
-            ticket=ticket, actor="care_panel", event="status_mirrored",
-            detail={"from": old, "to": new_status})
+    # 1) Mirror the status the agent set in the panel (real-time push path; shares the same
+    #    mapping + apply routine as the polling job).
+    if care_panel_status.apply_status(
+            ticket, _normalize_status(payload.get("status")),
+            source="care_panel", raw=payload.get("status")):
         actions.append("status")
 
     # 2) Forward the agent's reply to the customer (panel never mails directly).

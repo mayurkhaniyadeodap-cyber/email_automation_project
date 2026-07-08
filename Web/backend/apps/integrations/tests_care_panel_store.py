@@ -457,7 +457,10 @@ class TrackingEmailTests(TestCase):
         service.send_confirmation(t, "created")
         out = t.messages.filter(direction=Message.DIRECTION_OUTBOUND).first()
         self.assertEqual(out.subject, "Support Ticket Created Successfully")
-        self.assertIn(f"Ticket ID: {t.ticket_id}", out.body_text)   # generic fallback
+        # No Care Panel number for this ticket -> the internal TKT-... id is NOT shown to the
+        # customer (ticket-ID suppression); the acknowledgment body still goes out.
+        self.assertNotIn(t.ticket_id, out.body_text)
+        self.assertTrue(out.body_text.strip())
         self.assertNotIn("care.deodap.in/t?id=", out.body_text)
 
     def test_matched_uses_existing_ticket_found_email(self):
