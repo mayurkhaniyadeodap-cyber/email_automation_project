@@ -9,7 +9,8 @@ from datetime import timedelta
 from django.db.models import Avg, Count, Max
 from django.utils import timezone
 
-from apps.tickets.models import Escalation, InternalEmail, PendingConversation, Ticket
+from apps.tickets.models import (AuditLogEntry, Escalation, InternalEmail, PendingConversation,
+                                 Ticket)
 
 from .models import (AutoReplyLog, EmployeeActivity, EmployeeLoginHistory, ManualReplyLog)
 
@@ -55,6 +56,10 @@ def summary(brand_ids, now=None):
         "awaiting_customer_reply": _open_counts(E.filter(status=Escalation.STATUS_AWAITING_REPLY)),
         "awaiting_evidence": _open_counts(
             P.filter(status__in=["awaiting_evidence", "waiting_for_video"])),
+        # Automation-overview metrics (additive): verification-held conversations, and conversations
+        # that have received at least one evidence request. Distinct from the pipeline-state counts.
+        "verification_emails": _open_counts(P.filter(status="awaiting_verification")),
+        "evidence_requests": {"total": P.filter(evidence_requests__gt=0).count()},
         "resolved_today": {"total": T.filter(status__in=[Ticket.STATUS_RESOLVED,
                                                          Ticket.STATUS_AUTO_RESOLVED]).count(),
                            "today": T.filter(resolved_at__date=now.date()).count(),
@@ -125,6 +130,24 @@ def daily_series(brand_ids, days=7, now=None):
         "manual_replies": by_day(ManualReplyLog.objects.filter(brand_id__in=brand_ids), "created_at"),
         "escalations": by_day(Escalation.objects.filter(brand_id__in=brand_ids), "created_at"),
     }
+
+
+def recent_activity(brand_ids, limit=20):
+    """The latest audit events across the brand's tickets (newest first) for the dashboard's
+    Recent Activity timeline. Additive/read-only -- reuses the existing AuditLogEntry rows."""
+    rows = (AuditLogEntry.objects.filter(ticket__brand_id__in=brand_ids)
+            .select_related("ticket").order_by("-created_at")[:limit])
+    out = []
+    for r in rows:
+        t = r.ticket
+        out.append({
+            "at": r.created_at.isoformat(),
+            "event": r.event,
+            "actor": r.actor,
+            "ticket": (getattr(t, "ticket_number", "") or getattr(t, "ticket_id", "")) if t else "",
+            "detail": r.detail or {},
+        })
+    return out
 
 
 def category_distribution(brand_ids):

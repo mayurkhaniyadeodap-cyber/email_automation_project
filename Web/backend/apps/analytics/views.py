@@ -152,6 +152,7 @@ def manager_dashboard(request):
                      "manual_review": _scope(Escalation.objects.filter(
                          status=Escalation.STATUS_MANUAL_REVIEW), request).count()},
         "series": dash.daily_series(bids, days=7),
+        "recent_activity": dash.recent_activity(bids),
         "category_distribution": dash.category_distribution(bids),
         "employee_performance": dash.employee_performance(bids),
         "scoreboard": dash.scoreboard(bids),

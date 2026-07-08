@@ -11,146 +11,284 @@ import TableRow from "@mui/material/TableRow";
 import Typography from "@mui/material/Typography";
 import { api } from "../api";
 import { fmtDate } from "./chips.jsx";
+import Sym from "./Sym.jsx";
 
-// Uniform, non-stretching card grid (auto-fill keeps every card the same width, even on a
-// partial last row -- the old flexbox stretched 2-card rows to full width).
-const GRID = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
-  gap: 1.5,   // MUI spacing: 1.5 * 8px = 12px (NOT 1.5px)
-  mb: 3,
+const BLUE = "#2563eb", GREEN = "#16a34a", ORANGE = "#f59e0b", RED = "#ef4444";
+
+const CARD = {
+  p: 3, borderRadius: "16px", bgcolor: "#fff", border: "1px solid #eef1f5",
+  boxShadow: "0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06)",
+  transition: "box-shadow .18s ease, transform .18s ease",
 };
 
-function KPI({ label, data, color, to }) {
+function SectionTitle({ children }) {
+  return (
+    <Typography sx={{ fontSize: 20, fontWeight: 700, color: "#0f172a", mb: 2 }}>{children}</Typography>
+  );
+}
+
+function PanelTitle({ children }) {
+  return (
+    <Typography sx={{ fontSize: 16, fontWeight: 700, color: "#0f172a", mb: 2 }}>{children}</Typography>
+  );
+}
+
+function KpiCard({ icon, title, count, subtitle, color, to }) {
   const navigate = useNavigate();
-  const total = data?.total ?? 0;
-  const hasTrend = data?.today != null || data?.week != null;
   return (
     <Paper
       elevation={0}
       onClick={() => to && navigate(to)}
       sx={{
-        position: "relative", overflow: "hidden", p: 2, pl: 2.25, borderRadius: 2,
-        border: "1px solid", borderColor: "divider", cursor: to ? "pointer" : "default",
-        transition: "box-shadow .15s, transform .15s",
-        "&:hover": to ? { boxShadow: 3, transform: "translateY(-2px)" } : {},
-        "&::before": {
-          content: '""', position: "absolute", left: 0, top: 0, bottom: 0, width: 4, bgcolor: color,
-        },
+        ...CARD, height: "100%", cursor: to ? "pointer" : "default",
+        "&:hover": to ? { boxShadow: "0 8px 22px rgba(16,24,40,.10)", transform: "translateY(-2px)" } : {},
       }}
     >
-      <Typography sx={{ fontSize: 30, fontWeight: 800, lineHeight: 1.1, color: "#1f2937" }}>
-        {total}
+      <Box sx={{
+        width: 48, height: 48, borderRadius: "50%", bgcolor: `${color}15`, color,
+        display: "grid", placeItems: "center", mb: 1.75,
+      }}>
+        <Sym name={icon} size={24} />
+      </Box>
+      <Typography sx={{ fontSize: 15, fontWeight: 600, color: "#475569" }}>{title}</Typography>
+      <Typography sx={{ fontSize: 36, fontWeight: 800, color: "#0f172a", lineHeight: 1.1, mt: 0.5 }}>
+        {count}
       </Typography>
-      <Typography variant="body2" sx={{ color: "text.secondary", mt: 0.5, fontWeight: 500 }}>
-        {label}
-      </Typography>
-      {hasTrend && (
-        <Typography variant="caption" sx={{ color: "text.disabled", display: "block", mt: 0.5 }}>
-          {data?.today != null ? `Today ${data.today}` : ""}
-          {data?.week != null ? `  ·  7d ${data.week}` : ""}
-        </Typography>
-      )}
+      <Typography sx={{ fontSize: 13, color: "#94a3b8", mt: 0.5 }}>{subtitle}</Typography>
     </Paper>
   );
 }
+
+// Minimal line chart: single blue line, NO gradient / fill.
+function LineChart({ labels = [], values = [], color = BLUE }) {
+  const W = 720, H = 240, PL = 32, PR = 14, PT = 16, PB = 28;
+  const n = values.length;
+  const niceMax = Math.max(4, Math.ceil(Math.max(1, ...values) / 4) * 4);
+  const x = (i) => PL + (n <= 1 ? 0 : (i / (n - 1)) * (W - PL - PR));
+  const y = (v) => H - PB - (v / niceMax) * (H - PT - PB);
+  const pts = values.map((v, i) => [x(i), y(v)]);
+  const poly = pts.map(([px, py]) => `${px},${py}`).join(" ");
+  const grid = [0, 0.5, 1].map((f) => Math.round(niceMax * f));
+  return (
+    <Box component="svg" viewBox={`0 0 ${W} ${H}`} sx={{ width: "100%", height: "auto", display: "block" }}>
+      {grid.map((g, i) => (
+        <g key={i}>
+          <line x1={PL} y1={y(g)} x2={W - PR} y2={y(g)} stroke="#eef1f5" strokeWidth="1" />
+          <text x={PL - 8} y={y(g) + 3} textAnchor="end" fontSize="10" fill="#94a3b8">{g}</text>
+        </g>
+      ))}
+      {n > 1 && (
+        <polyline points={poly} fill="none" stroke={color} strokeWidth="2.5"
+          strokeLinejoin="round" strokeLinecap="round" />
+      )}
+      {pts.map(([px, py], i) => (
+        <circle key={i} cx={px} cy={py} r="3.5" fill="#fff" stroke={color} strokeWidth="2" />
+      ))}
+      {labels.map((l, i) => (
+        <text key={i} x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="#94a3b8">{l}</text>
+      ))}
+    </Box>
+  );
+}
+
+// Horizontal bar chart (monochrome blue) for ticket categories.
+const BAR_SHADES = ["#2563eb", "#3b82f6", "#60a5fa", "#93c5fd", "#bfdbfe", "#c7d2fe"];
+function CategoryBars({ data = [] }) {
+  const clean = (data || []).map((x) => ({ label: String(x.label || "").replace(/^\d+\.?\s*/, ""), value: x.value }))
+    .sort((a, b) => b.value - a.value);
+  const top = clean.slice(0, 6);
+  const total = clean.reduce((sm, x) => sm + x.value, 0) || 0;
+  const max = Math.max(1, ...top.map((x) => x.value));
+  if (top.length === 0) return <Typography sx={{ fontSize: 13, color: "#94a3b8" }}>No category data yet.</Typography>;
+  return (
+    <Box>
+      {top.map((c, i) => (
+        <Box key={i} sx={{ mb: i < top.length - 1 ? 2 : 0 }}>
+          <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.75 }}>
+            <Typography sx={{ fontSize: 13.5, color: "#334155", fontWeight: 600 }}>{c.label}</Typography>
+            <Typography sx={{ fontSize: 13, color: "#64748b" }}>
+              {c.value} ({total ? Math.round((c.value / total) * 100) : 0}%)
+            </Typography>
+          </Box>
+          <Box sx={{ height: 10, bgcolor: "#eef1f5", borderRadius: "6px", overflow: "hidden" }}>
+            <Box sx={{ height: "100%", width: `${(c.value / max) * 100}%`, bgcolor: BAR_SHADES[i % BAR_SHADES.length], borderRadius: "6px" }} />
+          </Box>
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+function fmtDuration(sec) {
+  if (sec == null) return "—";
+  const s = Math.round(sec), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+const gridSix = { display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", sm: "repeat(3,1fr)", lg: "repeat(6,1fr)" } };
+const gridFive = { display: "grid", gap: 2.5, gridTemplateColumns: { xs: "1fr", sm: "repeat(3,1fr)", lg: "repeat(5,1fr)" } };
 
 export default function Dashboard() {
   const { refreshKey, orgId, brandId } = useOutletContext();
   const navigate = useNavigate();
   const [d, setD] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [composeCount, setComposeCount] = useState(null);
 
   useEffect(() => {
     if (!brandId) return;
     setLoading(true);
     api.get("/analytics/dashboard/", { organization: orgId, brand: brandId })
       .then(setD).finally(() => setLoading(false));
+    api.get("/compose-emails/", { organization: orgId, brand: brandId })
+      .then((r) => setComposeCount(r?.count ?? (Array.isArray(r) ? r.length : (r?.results || []).length)))
+      .catch(() => setComposeCount(null));
   }, [orgId, brandId, refreshKey]);
 
-  if (loading || !d) return <Box sx={{ p: 6, textAlign: "center" }}><CircularProgress /></Box>;
-  const s = d.summary || {}, p = d.pipeline || {};
+  if (loading || !d) {
+    return <Box sx={{ p: 6, textAlign: "center" }}><CircularProgress /></Box>;
+  }
 
-  const cards = [
-    ["Total Emails Received", s.total_emails, "#37474f", "/inbox"],
-    ["Total Tickets", s.total_tickets, "#1565c0", "/tickets"],
-    ["Open Tickets", s.open_tickets, "#2e7d32", "/tickets?status=open"],
-    ["Closed Tickets", s.closed_tickets, "#546e7a", "/tickets?status=closed"],
-    ["Ignored Emails", s.ignored_emails, "#ed6c02", "/inbox?status=ignored"],
-    ["High Priority", s.high_priority, "#d32f2f", "/tickets?priority=high"],
+  const s = d.summary || {}, p = d.pipeline || {}, series = d.series || {};
+  const cnt = (x) => (x && typeof x === "object" ? (x.total ?? 0) : (x ?? 0));
+  const tdy = (x) => (x && typeof x === "object" && x.today != null ? x.today : null);
+  const card = (icon, title, src, color, to) => ({
+    icon, title, color, to, count: cnt(src),
+    subtitle: tdy(src) != null ? `Today +${tdy(src)}` : "Currently open",
+  });
+
+  const support = [
+    card("mail", "Total Emails", s.total_emails, BLUE, "/inbox"),
+    card("confirmation_number", "Total Tickets", s.total_tickets, BLUE, "/tickets"),
+    card("folder_open", "Open Tickets", s.open_tickets, ORANGE, "/tickets?status=open"),
+    card("task_alt", "Closed Tickets", s.closed_tickets, GREEN, "/tickets?status=closed"),
+    card("block", "Ignored Emails", s.ignored_emails, ORANGE, "/inbox?status=ignored"),
+    card("flag", "High Priority", s.high_priority, RED, "/tickets?priority=high"),
   ];
 
   const pipeline = [
-    ["Waiting For Evidence", { total: p.waiting_evidence }, "#f9a825", "/pending?status=waiting_for_video"],
-    ["Awaiting Agent", { total: p.awaiting_agent }, "#0288d1", "/tickets?status=awaiting_agent"],
-    ["In Progress", { total: p.in_progress }, "#6a1b9a", "/tickets?status=in_progress,escalated"],
-    ["Resolved", { total: p.resolved }, "#2e7d32", "/tickets?status=resolved,auto_resolved"],
-    ["Auto Replies Sent", s.auto_replies, "#00838f", "/reports/auto"],
-    ["Manual Replies Sent", s.manual_replies, "#6a1b9a", "/reports/manual"],
+    card("verified_user", "Waiting Verification", s.pending_manual_review, ORANGE, "/escalation"),
+    card("photo_camera", "Waiting Evidence", p.waiting_evidence, ORANGE, "/pending?status=waiting_for_video"),
+    card("support_agent", "Awaiting Agent", p.awaiting_agent, BLUE, "/tickets?status=awaiting_agent"),
+    card("autorenew", "In Progress", p.in_progress, BLUE, "/tickets?status=in_progress,escalated"),
+    card("check_circle", "Resolved", p.resolved, GREEN, "/tickets?status=resolved,auto_resolved"),
   ];
 
+  const automation = [
+    card("smart_toy", "Auto Replies Sent", s.auto_replies, GREEN, "/reports/auto"),
+    card("reply", "Manual Reply Sent", s.manual_replies, BLUE, "/reports/manual"),
+    card("verified_user", "Verification Emails", s.verification_emails, ORANGE, "/pending"),
+    card("attach_file", "Evidence Requests", s.evidence_requests, ORANGE, "/pending?status=waiting_for_video"),
+    { icon: "edit_square", title: "Compose Emails", color: BLUE, to: "/compose",
+      count: composeCount ?? "—", subtitle: composeCount != null ? "Total" : "—" },
+  ];
+
+  const trendLabels = series.labels || [];
+  const trendValues = series.tickets_created || series.emails_received || [];
+  const perf = d.employee_performance || [];
+
   return (
-    <Box sx={{ maxWidth: 1280 }}>
-      <SectionTitle>Support Overview</SectionTitle>
-      <Box sx={GRID}>
-        {cards.map(([label, data, color, to]) => (
-          <KPI key={label} label={label} data={data} color={color} to={to} />
-        ))}
+    <Box sx={{ maxWidth: 1360, pb: 1 }}>
+      {/* 1) Support Overview */}
+      <Box sx={{ mb: 4 }}>
+        <SectionTitle>Support Overview</SectionTitle>
+        <Box sx={gridSix}>{support.map((c) => <KpiCard key={c.title} {...c} />)}</Box>
       </Box>
 
-      <SectionTitle>Pipeline</SectionTitle>
-      <Box sx={GRID}>
-        {pipeline.map(([label, data, color, to]) => (
-          <KPI key={label} label={label} data={data} color={color} to={to} />
-        ))}
+      {/* 2) Ticket Pipeline */}
+      <Box sx={{ mb: 4 }}>
+        <SectionTitle>Ticket Pipeline</SectionTitle>
+        <Box sx={gridFive}>{pipeline.map((c) => <KpiCard key={c.title} {...c} />)}</Box>
       </Box>
 
-      {/* Employee performance */}
-      <SectionTitle>Employee Performance</SectionTitle>
-      <Paper elevation={0} sx={{ overflowX: "auto", borderRadius: 2, border: "1px solid",
-        borderColor: "divider" }}>
-        <Table size="small">
-          <TableHead>
-            <TableRow sx={{ "& th": { bgcolor: "#f8fafc", fontWeight: 700, color: "#475569" } }}>
-              <TableCell>Employee</TableCell><TableCell>Email</TableCell>
-              <TableCell align="right">Manual</TableCell><TableCell align="right">Auto</TableCell>
-              <TableCell align="right">Created</TableCell><TableCell align="right">Resolved</TableCell>
-              <TableCell align="right">Escalations</TableCell><TableCell align="right">Avg Resp</TableCell>
-              <TableCell>Last Active</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {(d.employee_performance || []).map((e) => (
-              <TableRow key={e.employee_key || e.employee_email} hover sx={{ cursor: "pointer" }}
-                onClick={() => (e.employee_key || e.employee_email) &&
-                  navigate(`/reports/manual?employee=${encodeURIComponent(e.employee_key || e.employee_email)}`)}>
-                <TableCell>{e.employee_name || "—"}</TableCell>
-                <TableCell>{e.employee_email || "—"}</TableCell>
-                <TableCell align="right">{e.manual_replies}</TableCell>
-                <TableCell align="right">{e.auto_replies}</TableCell>
-                <TableCell align="right">{e.tickets_created}</TableCell>
-                <TableCell align="right">{e.tickets_resolved}</TableCell>
-                <TableCell align="right">{e.escalations_handled}</TableCell>
-                <TableCell align="right">{e.avg_response_seconds != null ? `${e.avg_response_seconds}s` : "—"}</TableCell>
-                <TableCell>{e.last_active ? fmtDate(e.last_active) : "—"}</TableCell>
-              </TableRow>
-            ))}
-            {(d.employee_performance || []).length === 0 && (
-              <TableRow><TableCell colSpan={9} align="center" sx={{ py: 3, color: "text.secondary" }}>
-                No agent activity yet.</TableCell></TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </Paper>
+      {/* 3) Automation Overview */}
+      <Box sx={{ mb: 4 }}>
+        <SectionTitle>Automation Overview</SectionTitle>
+        <Box sx={gridFive}>{automation.map((c) => <KpiCard key={c.title} {...c} />)}</Box>
+      </Box>
+
+      {/* 5) Ticket Trend */}
+      <Box sx={{ mb: 4 }}>
+        <Paper elevation={0} sx={CARD}>
+          <PanelTitle>Ticket Trend — Last 7 Days</PanelTitle>
+          <LineChart labels={trendLabels} values={trendValues} />
+        </Paper>
+      </Box>
+
+      {/* 6) Ticket Categories */}
+      <Box sx={{ mb: 4 }}>
+        <Paper elevation={0} sx={CARD}>
+          <PanelTitle>Ticket Categories</PanelTitle>
+          <CategoryBars data={d.category_distribution} />
+        </Paper>
+      </Box>
+
+      {/* 7) Employee Performance */}
+      <Box sx={{ mb: 3 }}>
+        <Paper elevation={0} sx={{ ...CARD, p: 0, overflow: "hidden" }}>
+          <Box sx={{ p: 3, pb: 2 }}><PanelTitle>Employee Performance</PanelTitle></Box>
+          <Box sx={{ overflowX: "auto" }}>
+            <Table sx={{ minWidth: 820 }}>
+              <TableHead>
+                <TableRow sx={{
+                  "& th": {
+                    bgcolor: "#f8fafc", fontWeight: 700, color: "#64748b", fontSize: 12,
+                    textTransform: "uppercase", letterSpacing: 0.4, borderBottom: "1px solid #eef1f5", py: 1.5,
+                  },
+                }}>
+                  <TableCell>Employee</TableCell>
+                  <TableCell align="right">Manual Replies</TableCell>
+                  <TableCell align="right">Auto Replies</TableCell>
+                  <TableCell align="right">Created Tickets</TableCell>
+                  <TableCell align="right">Resolved Tickets</TableCell>
+                  <TableCell align="right">Escalations</TableCell>
+                  <TableCell align="right">Avg Response Time</TableCell>
+                  <TableCell>Last Active</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {perf.map((e) => (
+                  <TableRow
+                    key={e.employee_key || e.employee_email}
+                    hover
+                    sx={{
+                      cursor: "pointer", transition: "background .12s",
+                      "&:hover": { bgcolor: "#f8fafc" },
+                      "& td": { borderBottom: "1px solid #f1f5f9", py: 1.5, fontSize: 14 },
+                    }}
+                    onClick={() => (e.employee_key || e.employee_email) &&
+                      navigate(`/reports/manual?employee=${encodeURIComponent(e.employee_key || e.employee_email)}`)}
+                  >
+                    <TableCell sx={{ fontWeight: 600, color: "#0f172a" }}>{e.employee_name || "—"}</TableCell>
+                    <TableCell align="right">{e.manual_replies}</TableCell>
+                    <TableCell align="right">{e.auto_replies}</TableCell>
+                    <TableCell align="right">{e.tickets_created}</TableCell>
+                    <TableCell align="right">{e.tickets_resolved}</TableCell>
+                    <TableCell align="right">{e.escalations_handled}</TableCell>
+                    <TableCell align="right">{fmtDuration(e.avg_response_seconds)}</TableCell>
+                    <TableCell sx={{ color: "#64748b", fontSize: 13 }}>
+                      {e.last_active ? fmtDate(e.last_active) : "—"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {perf.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={8} align="center" sx={{ py: 4, color: "text.secondary" }}>
+                      No agent activity yet.
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </Box>
+        </Paper>
+      </Box>
+
+      <Typography sx={{ textAlign: "center", color: "#94a3b8", fontSize: 12.5, py: 2 }}>
+        © {new Date().getFullYear()} DeoDap Care Panel. All rights reserved.
+      </Typography>
     </Box>
-  );
-}
-
-function SectionTitle({ children }) {
-  return (
-    <Typography sx={{ fontSize: 13, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase",
-      color: "#64748b", mb: 1.25, mt: 0.5 }}>
-      {children}
-    </Typography>
   );
 }
