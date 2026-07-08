@@ -132,6 +132,51 @@ def daily_series(brand_ids, days=7, now=None):
     }
 
 
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def ticket_trend(brand_ids, rng="week", now=None):
+    """Ticket-created counts for the dynamic Ticket Trend chart. Returns {labels, values}.
+      week  -> last 7 days,   labels = weekday   (Mon..Sun)
+      month -> last 30 days,  labels = day-of-month (1..31)
+      year  -> last 12 months, labels = month    (Jan..Dec)
+    One grouped query per range (optimized for large datasets)."""
+    now = now or timezone.now()
+    T = Ticket.objects.filter(brand_id__in=brand_ids)
+
+    if rng == "year":
+        from django.db.models.functions import TruncMonth
+
+        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        months, y, m = [], first.year, first.month
+        for _ in range(12):
+            months.append((y, m))
+            m -= 1
+            if m == 0:
+                m, y = 12, y - 1
+        months.reverse()
+        cutoff = first.replace(year=months[0][0], month=months[0][1])
+        by = {}
+        for row in (T.filter(created_at__gte=cutoff).annotate(mo=TruncMonth("created_at"))
+                    .values("mo").annotate(n=Count("id"))):
+            mo = row["mo"]
+            if mo:
+                by[(mo.year, mo.month)] = row["n"]
+        return {"labels": [_MONTH_ABBR[mm - 1] for (_, mm) in months],
+                "values": [by.get((yy, mm), 0) for (yy, mm) in months]}
+
+    days = 30 if rng == "month" else 7
+    start = (now - timedelta(days=days - 1)).date()
+    rows = dict(
+        (d.isoformat() if hasattr(d, "isoformat") else str(d), n)
+        for d, n in (T.filter(created_at__date__gte=start)
+                     .values_list("created_at__date").annotate(n=Count("id"))))
+    dates = [start + timedelta(days=i) for i in range(days)]
+    labels = [(d.strftime("%a") if rng == "week" else str(d.day)) for d in dates]
+    values = [rows.get(d.isoformat(), 0) for d in dates]
+    return {"labels": labels, "values": values}
+
+
 def recent_activity(brand_ids, limit=20):
     """The latest audit events across the brand's tickets (newest first) for the dashboard's
     Recent Activity timeline. Additive/read-only -- reuses the existing AuditLogEntry rows."""

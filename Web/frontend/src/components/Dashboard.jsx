@@ -12,6 +12,7 @@ import Typography from "@mui/material/Typography";
 import { api } from "../api";
 import { fmtDate } from "./chips.jsx";
 import Sym from "./Sym.jsx";
+import TicketTrendCard from "./TicketTrendCard.jsx";
 
 const BLUE = "#2563eb", GREEN = "#16a34a", ORANGE = "#f59e0b", RED = "#ef4444";
 
@@ -56,38 +57,6 @@ function KpiCard({ icon, title, count, subtitle, color, to }) {
       </Typography>
       <Typography sx={{ fontSize: 13, color: "#94a3b8", mt: 0.5 }}>{subtitle}</Typography>
     </Paper>
-  );
-}
-
-// Minimal line chart: single blue line, NO gradient / fill.
-function LineChart({ labels = [], values = [], color = BLUE }) {
-  const W = 720, H = 240, PL = 32, PR = 14, PT = 16, PB = 28;
-  const n = values.length;
-  const niceMax = Math.max(4, Math.ceil(Math.max(1, ...values) / 4) * 4);
-  const x = (i) => PL + (n <= 1 ? 0 : (i / (n - 1)) * (W - PL - PR));
-  const y = (v) => H - PB - (v / niceMax) * (H - PT - PB);
-  const pts = values.map((v, i) => [x(i), y(v)]);
-  const poly = pts.map(([px, py]) => `${px},${py}`).join(" ");
-  const grid = [0, 0.5, 1].map((f) => Math.round(niceMax * f));
-  return (
-    <Box component="svg" viewBox={`0 0 ${W} ${H}`} sx={{ width: "100%", height: "auto", display: "block" }}>
-      {grid.map((g, i) => (
-        <g key={i}>
-          <line x1={PL} y1={y(g)} x2={W - PR} y2={y(g)} stroke="#eef1f5" strokeWidth="1" />
-          <text x={PL - 8} y={y(g) + 3} textAnchor="end" fontSize="10" fill="#94a3b8">{g}</text>
-        </g>
-      ))}
-      {n > 1 && (
-        <polyline points={poly} fill="none" stroke={color} strokeWidth="2.5"
-          strokeLinejoin="round" strokeLinecap="round" />
-      )}
-      {pts.map(([px, py], i) => (
-        <circle key={i} cx={px} cy={py} r="3.5" fill="#fff" stroke={color} strokeWidth="2" />
-      ))}
-      {labels.map((l, i) => (
-        <text key={i} x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="#94a3b8">{l}</text>
-      ))}
-    </Box>
   );
 }
 
@@ -151,7 +120,7 @@ export default function Dashboard() {
     return <Box sx={{ p: 6, textAlign: "center" }}><CircularProgress /></Box>;
   }
 
-  const s = d.summary || {}, p = d.pipeline || {}, series = d.series || {};
+  const s = d.summary || {}, p = d.pipeline || {};
   const cnt = (x) => (x && typeof x === "object" ? (x.total ?? 0) : (x ?? 0));
   const tdy = (x) => (x && typeof x === "object" && x.today != null ? x.today : null);
   const card = (icon, title, src, color, to) => ({
@@ -185,8 +154,6 @@ export default function Dashboard() {
       count: composeCount ?? "—", subtitle: composeCount != null ? "Total" : "—" },
   ];
 
-  const trendLabels = series.labels || [];
-  const trendValues = series.tickets_created || series.emails_received || [];
   const perf = d.employee_performance || [];
 
   return (
@@ -209,12 +176,9 @@ export default function Dashboard() {
         <Box sx={gridFive}>{automation.map((c) => <KpiCard key={c.title} {...c} />)}</Box>
       </Box>
 
-      {/* 5) Ticket Trend */}
+      {/* 5) Ticket Trend (dynamic Week / Month / Year) */}
       <Box sx={{ mb: 4 }}>
-        <Paper elevation={0} sx={CARD}>
-          <PanelTitle>Ticket Trend — Last 7 Days</PanelTitle>
-          <LineChart labels={trendLabels} values={trendValues} />
-        </Paper>
+        <TicketTrendCard orgId={orgId} brandId={brandId} refreshKey={refreshKey} />
       </Box>
 
       {/* 6) Ticket Categories */}

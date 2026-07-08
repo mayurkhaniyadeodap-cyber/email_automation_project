@@ -156,3 +156,49 @@ class ReportTests(DashboardBase):
         self.assertEqual(exports.to_csv([], "x").status_code, 200)
         self.assertEqual(exports.to_excel([], "x").status_code, 200)
         self.assertEqual(exports.to_pdf([], "x").status_code, 200)
+
+
+from datetime import timedelta  # noqa: E402
+
+
+class TicketTrendTests(DashboardBase):
+    """Dynamic Ticket Trend endpoint: GET /api/dashboard/ticket-trend?range=week|month|year."""
+
+    def _at(self, days_ago):
+        t = self._ticket()
+        Ticket.objects.filter(pk=t.pk).update(created_at=timezone.now() - timedelta(days=days_ago))
+        return t
+
+    def test_week_range(self):
+        self._at(0); self._at(0); self._at(3)                       # 2 today, 1 three days ago
+        r = self.client.get("/api/dashboard/ticket-trend?range=week")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.data["labels"]), 7)
+        self.assertEqual(len(r.data["values"]), 7)
+        self.assertEqual(sum(r.data["values"]), 3)
+        self.assertEqual(r.data["values"][-1], 2)                   # today = last bucket
+        self.assertIn(r.data["labels"][0], ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+
+    def test_month_range(self):
+        self._at(0); self._at(10)
+        r = self.client.get("/api/dashboard/ticket-trend?range=month")
+        self.assertEqual(len(r.data["labels"]), 30)
+        self.assertEqual(len(r.data["values"]), 30)
+        self.assertEqual(sum(r.data["values"]), 2)
+        self.assertTrue(all(l.isdigit() for l in r.data["labels"]))  # day-of-month labels
+
+    def test_year_range(self):
+        self._at(0); self._at(45)                                   # this month + ~1-2 months ago
+        r = self.client.get("/api/dashboard/ticket-trend?range=year")
+        self.assertEqual(len(r.data["labels"]), 12)
+        self.assertEqual(len(r.data["values"]), 12)
+        self.assertEqual(sum(r.data["values"]), 2)
+        self.assertEqual(r.data["labels"][-1], dash._MONTH_ABBR[timezone.now().month - 1])
+
+    def test_default_and_invalid_range(self):
+        self.assertEqual(len(self.client.get("/api/dashboard/ticket-trend").data["labels"]), 7)
+        self.assertEqual(
+            len(self.client.get("/api/dashboard/ticket-trend?range=bogus").data["labels"]), 7)
+
+    def test_requires_auth(self):
+        self.assertIn(APIClient().get("/api/dashboard/ticket-trend").status_code, (401, 403))

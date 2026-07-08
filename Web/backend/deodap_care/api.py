@@ -215,6 +215,7 @@ urlpatterns = [
     path("gmail/fetch/", gmail_fetch, name="gmail-fetch"),
     path("attachments/<int:pk>/", attachment_file, name="attachment-file"),
     path("search/suggest/", search_suggest, name="search-suggest"),   # global autocomplete
+    path("dashboard/ticket-trend", analytics_views.ticket_trend, name="dashboard-ticket-trend"),
     path("analytics/overview/", analytics_views.overview, name="analytics-overview"),
     path("analytics/volume/", analytics_views.volume, name="analytics-volume"),
     path("analytics/sla/", analytics_views.sla, name="analytics-sla"),

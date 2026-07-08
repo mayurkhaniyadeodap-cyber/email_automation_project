@@ -161,6 +161,16 @@ def manager_dashboard(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def ticket_trend(request):
+    """Dynamic Ticket Trend series. ?range=week|month|year (default week) -> {labels, values}."""
+    rng = (request.query_params.get("range") or "week").strip().lower()
+    if rng not in ("week", "month", "year"):
+        rng = "week"
+    return Response(dash.ticket_trend(_scoped_brand_ids(request), rng))
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def employee_performance(request):
     return Response(dash.employee_performance(_scoped_brand_ids(request)))
 
