@@ -119,10 +119,13 @@ class ReplyUpdateTests(BaseFixture):
         self.assertEqual(Ticket.objects.count(), 1)  # NO duplicate ticket
         t = Ticket.objects.get()
         self.assertEqual(t.messages.filter(direction=Message.DIRECTION_INBOUND).count(), 2)
-        self.assertTrue(t.audit_log.filter(event="ticket_updated").exists())
-        # An "updated" confirmation went out (M6, with the tracking link now present).
+        # FLOW 1: "any update?" is a STATUS_REQUEST -> an automated status mail goes out, and the
+        # customer is NEVER told 'Existing Ticket Found' (that is reserved for a brand-new email
+        # that duplicates an open ticket -- FLOW 2).
+        self.assertTrue(t.audit_log.filter(event="status_update_sent").exists())
         self.assertTrue(t.messages.filter(
-            subject__in=["Existing Ticket Found", "Ticket Updated Successfully"]).exists())
+            direction=Message.DIRECTION_OUTBOUND, subject__startswith="Ticket Update").exists())
+        self.assertFalse(t.messages.filter(subject="Existing Ticket Found").exists())
 
     def test_photo_reply_records_evidence_and_updates(self):
         first = eml(subject="damaged product", body="broken order DD9999", message_id="<a@x>")

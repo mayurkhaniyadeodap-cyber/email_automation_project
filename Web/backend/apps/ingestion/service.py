@@ -4228,7 +4228,9 @@ def handle_incoming_email(mailbox, message):
     if threaded is not None:
         ticket, msg, created = ingest_message(mailbox, message)
         if created and not getattr(ticket, "_created_now", False) and not ticket.is_ignored:
-            process_existing_reply(ticket)
+            # FLOW 1: a reply on an existing thread is classified (status / info / ack / new
+            # issue) -- NEVER run through duplicate detection or emailed 'Existing Ticket Found'.
+            process_existing_reply(ticket, message=message, mailbox=mailbox)
         return ticket, msg, created
 
     # 4-cod) CASH ON DELIVERY inquiry -> fixed 'online prepaid only' auto-reply + Auto Resolved.
@@ -4940,22 +4942,189 @@ def process_new_ticket(ticket):
     return ticket
 
 
-def process_existing_reply(ticket):
-    """A reply / follow-up (incl. photo/video) on an EXISTING ticket. The message +
-    attachments were already appended at ingest. Finalize a deferred ticket once
-    evidence arrives, else just update + confirm."""
+# === FLOW 1: existing-ticket reply classifier ==================================================
+# A reply that threads into an existing ticket is NEVER run through duplicate-ticket detection and
+# NEVER receives an 'Existing Ticket Found' (M6) mail. Instead it is sorted into one of four
+# intents, so a plain "Thank you" is saved silently, a "status?" gets an automated update, an
+# attachment is filed as evidence, and a genuinely new complaint spawns its OWN ticket.
+REPLY_STATUS_REQUEST = "STATUS_REQUEST"
+REPLY_ADDITIONAL_INFORMATION = "ADDITIONAL_INFORMATION"
+REPLY_GENERAL = "GENERAL_REPLY"
+REPLY_NEW_ISSUE = "NEW_ISSUE"
+
+_REPLY_STATUS_KW = (
+    "any update", "status update", "status?", "the status", "current status", "latest status",
+    "any progress", "please update", "kindly update", "update me", "update please", "update?",
+    "can you check", "could you check", "please check", "when will", "how long", "resolved yet",
+    "still waiting", "update on my", "whats the update", "what's the update", "what is the update",
+)
+_REPLY_NEW_ISSUE_KW = (
+    "another issue", "another problem", "new issue", "new problem", "one more issue",
+    "one more problem", "separate issue", "different issue", "different order", "different product",
+    "another order", "another product", "payment failed", "refund not received",
+    "refund not receive", "not received my refund", "havent received refund",
+    "haven't received refund", "have not received refund", "raise a new complaint",
+)
+_REPLY_ACK_EXACT = {
+    "thank you", "thanks", "thank u", "thankyou", "thnx", "thx", "ty", "tq", "done", "ok",
+    "okay", "okey", "k", "kk", "received", "noted", "got it", "great", "good", "fine", "sure",
+    "perfect", "cool", "alright", "understood", "welcome", "no problem", "appreciate it",
+    "thank you so much", "thanks a lot", "thanks alot", "ok thanks", "okay thanks", "nice",
+    "yes", "yeah", "yup", "thank you very much",
+}
+_REPLY_ACK_FIRST = {
+    "thank", "thanks", "thankyou", "thx", "ty", "tq", "ok", "okay", "okey", "done", "noted",
+    "great", "perfect", "cool", "alright", "appreciate", "welcome", "understood",
+}
+
+
+def _clean_low(message):
+    """Lower-cased NEW reply body (quoted thread history stripped) for intent matching. The
+    subject is intentionally EXCLUDED: a reply's 'Re: <original>' subject echoes the original
+    complaint and would poison keyword detection (e.g. a ticket titled 'Refund not received'
+    would make every 'Thank you' reply look like a NEW_ISSUE)."""
+    if not message:
+        return ""
+    body = message.get("body_text") or message.get("snippet") or message.get("body") or ""
+    fresh = _clean_reply(body).strip() or body.strip()
+    return fresh.lower().strip()
+
+
+def _classify_reply(ticket, message):
+    """Sort a reply on an EXISTING ticket into one of the four reply intents (FLOW 1)."""
+    if message is None:
+        return REPLY_ADDITIONAL_INFORMATION
+    low = _clean_low(message)
+    has_attach = _message_has_evidence(message) or bool(
+        (message.get("attachment_blobs") or []) or (message.get("attachments") or []))
+
+    # A genuinely different complaint -> route to the normal AI flow (may open a new ticket).
+    if any(kw in low for kw in _REPLY_NEW_ISSUE_KW):
+        return REPLY_NEW_ISSUE
+    # Photo / video / invoice etc. -> evidence / additional information.
+    if has_attach:
+        return REPLY_ADDITIONAL_INFORMATION
+    # "Any update?" / "status?" -> send the automated ticket-status mail.
+    if any(kw in low for kw in _REPLY_STATUS_KW):
+        return REPLY_STATUS_REQUEST
+    # A short acknowledgement with no real content -> save only, no auto-reply.
+    words = re.sub(r"[^a-z0-9 ]+", " ", low).split()
+    compact = " ".join(words)
+    if compact and (compact in _REPLY_ACK_EXACT
+                    or (len(words) <= 4 and words[0] in _REPLY_ACK_FIRST)):
+        return REPLY_GENERAL
+    # Substantive free-text follow-up -> attach it to the ticket + notify the team (never M6).
+    return REPLY_ADDITIONAL_INFORMATION
+
+
+def _latest_customer_facing_note(ticket):
+    """The most recent internal/agent note on the ticket (for the status-update mail)."""
+    entry = (AuditLogEntry.objects.filter(ticket=ticket, event="internal_note")
+             .order_by("-created_at").first())
+    note = (entry.detail or {}).get("note") if entry else ""
+    return (note or "").strip()
+
+
+def _send_ticket_update(ticket):
+    """STATUS_REQUEST reply -> email the customer the ticket's latest status, note and link.
+    Never creates a ticket and never sends 'Existing Ticket Found'."""
+    if ticket.is_ignored or not ticket.customer_email:
+        return None
+    number = ticket.ticket_number or ticket.ticket_id
+    try:
+        status_txt = ticket.get_status_display()
+    except Exception:  # noqa: BLE001 -- status may lack choices
+        status_txt = (ticket.status or "").replace("_", " ").title()
+    latest_note = _latest_customer_facing_note(ticket) \
+        or "Your ticket is being reviewed by our team and we will update you shortly."
+    link = customer_ticket_link(ticket) or _care_panel_tracking_url(ticket) or ""
+    sign = mails.SIGN.get(mails.normalize_lang(ticket.language), mails.SIGN[mails.DEFAULT_LANG])
+    subject = f"Ticket Update - {number}"
+    lines = ["Dear Customer,", "", "Here is the latest update for your ticket.", "",
+             "Ticket ID:", str(number), "", "Current Status:", str(status_txt), "",
+             "Latest Update:", str(latest_note)]
+    if link:
+        lines += ["", "View Ticket:", link]
+    body = "\n".join(lines) + f"\n\n{sign}"
+    confirm_from = reply_from_address(ticket.mailbox)
+    msg = Message.objects.create(
+        ticket=ticket, direction=Message.DIRECTION_OUTBOUND, from_email=confirm_from,
+        to_email=ticket.customer_email, subject=subject, body_text=body, sent_at=timezone.now())
+    logger.info("STATUS-UPDATE-SEND ticket=%s to=%s status=%s", ticket.ticket_id,
+                ticket.customer_email, ticket.status)
+    try:
+        send_reply(msg)
+    except Exception:  # noqa: BLE001 -- best-effort
+        logger.exception("Ticket-update reply send FAILED for %s", ticket.ticket_id)
+    AuditLogEntry.objects.create(ticket=ticket, actor="system", event="status_update_sent",
+                                 detail={"status": ticket.status})
+    return msg
+
+
+def _base_category(cat):
+    """Leading category code ('8. Payment & Invoice' -> '8')."""
+    return (cat or "").split(".")[0].strip().lower()
+
+
+def _handle_reply_new_issue(mailbox, parent, message):
+    """A reply raising a genuinely DIFFERENT complaint. Run the normal AI classification; if the
+    issue differs from the parent ticket, open a NEW ticket in its own thread via the standard
+    new-email flow (which includes the duplicate check). Same issue -> just attach the info."""
+    result = _classify_dict(mailbox.brand, message)
+    parent_cat = _base_category(parent.category)
+    new_cat = _base_category(getattr(result, "category", "") if result else "")
+    is_support = bool(result and getattr(result, "is_support_request", True))
+    if not result or not is_support or (new_cat and new_cat == parent_cat):
+        # Not a distinct new issue -> attach to the existing ticket (never 'Existing Ticket Found').
+        _add_internal_note(parent, "Additional information received from customer")
+        _sync_external(parent)
+        _upload_care_panel_media(parent)
+        return parent
+    # Distinct new issue -> spin up a SEPARATE ticket in its own thread and run the full flow.
+    new_thread = (message.get("message_id") or message.get("gmail_message_id")
+                  or f"{parent.thread_id or parent.ticket_id}:newissue")
+    fork = dict(message)
+    fork["thread_id"] = new_thread
+    fork["message_id"] = new_thread
+    fork["gmail_message_id"] = f"{message.get('gmail_message_id') or new_thread}::newissue"
+    fork["in_reply_to"] = ""
+    fork["references"] = []
+    ticket, _msg, created = ingest_message(mailbox, fork)
+    _add_internal_note(parent, f"Customer raised a separate issue -> new ticket {ticket.ticket_id}")
+    if created and getattr(ticket, "_created_now", False) and not ticket.is_ignored:
+        _add_internal_note(ticket, f"Split from a reply on ticket {parent.ticket_id}")
+        process_new_ticket(ticket)
+    logger.info("REPLY_NEW_ISSUE parent=%s new_ticket=%s parent_cat=%s new_cat=%s",
+                parent.ticket_id, ticket.ticket_id, parent_cat or "-", new_cat or "-")
+    return ticket
+
+
+def process_existing_reply(ticket, message=None, mailbox=None):
+    """A reply / follow-up (incl. photo/video) on an EXISTING ticket (FLOW 1). The message +
+    attachments were already appended at ingest. A reply is NEVER run through duplicate-ticket
+    detection and NEVER receives an 'Existing Ticket Found' mail; it is routed by a lightweight
+    reply classifier instead:
+        STATUS_REQUEST         -> email the latest status/note/link (no ticket, no M6)
+        ADDITIONAL_INFORMATION -> attach + notify the team (and finalize a deferred ticket once
+                                  its evidence arrives)
+        GENERAL_REPLY          -> save only; no auto-reply
+        NEW_ISSUE              -> run the normal AI flow (may open a new, separate ticket)
+    `message`/`mailbox` are optional for backward compatibility (message=None behaves as
+    ADDITIONAL_INFORMATION)."""
     ticket.refresh_from_db()
     if ticket.is_ignored:
         return ticket
 
     was_pending = ticket.pending_evidence
     has_evidence = _has_evidence(ticket)
-    _auto_decide(ticket)   # re-evaluate (evidence now present moves it forward)
-    ticket.refresh_from_db()
 
+    # (A) A still-deferred ticket whose evidence has NOW arrived -> finalize it (create the
+    #     external ticket + send the 'created' confirmation). Unchanged evidence-completion path.
     if was_pending:
+        _auto_decide(ticket)   # re-evaluate: evidence now present moves it forward
+        ticket.refresh_from_db()
         if not has_evidence:
-            return ticket  # still waiting; the engine re-requested evidence
+            return ticket      # still waiting; the engine re-requested evidence
         # Evidence arrived -> NOW create the Gallabox ticket + "created" confirmation.
         ticket.pending_evidence = False
         ticket.save(update_fields=["pending_evidence", "updated_at"])
@@ -4965,12 +5134,28 @@ def process_existing_reply(ticket):
         send_confirmation(ticket, "created")
         return ticket
 
-    # Existing established ticket -> update.
-    if has_evidence:
-        _add_internal_note(ticket, "Additional evidence received from customer")
-    _sync_external(ticket)
-    _upload_care_panel_media(ticket)
-    send_confirmation(ticket, "updated")
+    # (B) Established ticket -> classify the reply. This REPLACES the old blanket
+    #     send_confirmation(ticket, "updated") that wrongly emailed 'Existing Ticket Found' for
+    #     every follow-up (incl. a plain 'Thank you').
+    reply_type = _classify_reply(ticket, message)
+    logger.info("REPLY_CLASSIFIED ticket=%s type=%s from=%s", ticket.ticket_id, reply_type,
+                (message or {}).get("from_email") or "-")
+
+    if reply_type == REPLY_NEW_ISSUE and mailbox is not None and message is not None:
+        return _handle_reply_new_issue(mailbox, ticket, message)
+
+    if reply_type == REPLY_STATUS_REQUEST:
+        _send_ticket_update(ticket)
+        return ticket
+
+    if reply_type == REPLY_ADDITIONAL_INFORMATION:
+        _add_internal_note(ticket, "Additional evidence received from customer" if has_evidence
+                           else "Additional information received from customer")
+        _sync_external(ticket)
+        _upload_care_panel_media(ticket)
+        return ticket
+
+    # GENERAL_REPLY (e.g. "Thank you") -> the message is already saved; do nothing else.
     return ticket
 
 
